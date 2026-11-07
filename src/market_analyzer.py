@@ -1149,6 +1149,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 patterns["market_summary"],
                 stats_block,
             )
+            if stats_block not in review:
+                # Model headings may vary; the factual data/availability block is mandatory.
+                review = f"{review.rstrip()}\n\n{stats_block}\n"
 
         if indices_block:
             review = self._insert_after_section(
@@ -1195,10 +1198,13 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _build_stats_block(self, overview: MarketOverview) -> str:
         """Build market statistics block."""
-        has_stats = overview.up_count or overview.down_count or overview.total_amount
+        has_stats = overview.up_count + overview.down_count + overview.flat_count > 0
+        missing_notice = ("Market statistics unavailable: breadth, price-limit counts and aggregate turnover were not obtained; missing data is not zero."
+                if self._get_review_language() == "en"
+                else "市场统计未获取成功：涨跌家数、涨跌停数量和全市场成交额暂不可用；缺失不代表数值为0。") if self.profile.has_market_stats and not has_stats else ""
         has_market_signal = bool(self._supports_market_light() and (overview.indices or has_stats))
         if not has_stats and not has_market_signal:
-            return ""
+            return missing_notice
         light = self.build_market_light_snapshot(overview) if has_market_signal else None
         if self._get_review_language() == "en":
             lines = []
@@ -1220,7 +1226,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     f"Limit-up {overview.limit_up_count} / Limit-down {overview.limit_down_count}; "
                     f"Turnover {overview.total_amount:.0f} ({self._get_turnover_unit_label()})"
                 )
-            return "\n".join(lines)
+            return "\n".join(([missing_notice] if missing_notice else []) + lines)
         lines = []
         score = light["score"] if isinstance(light, dict) else None
         label = light["temperature_label"] if isinstance(light, dict) else ""
@@ -1247,7 +1253,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     f"| 两市成交额 | {overview.total_amount:.0f} 亿 | {self._describe_turnover(overview.total_amount)} |",
                 ]
             )
-        return "\n".join(lines)
+        return "\n".join(([missing_notice] if missing_notice else []) + lines)
 
     def build_market_light_snapshot(self, overview: MarketOverview) -> Dict[str, Any]:
         """Build a deterministic market-light snapshot from structured breadth data."""
@@ -1683,11 +1689,15 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             news_text += f"{i}. {title}{meta}\n   {snippet or '-'}{url_line}\n"
         
         # 按 region 组装市场概况与板块区块（美股/港股/日韩无涨跌家数、板块数据）
+        stats_available = bool(self.profile.has_market_stats and overview.up_count + overview.down_count + overview.flat_count > 0)
+        missing_notice = ("Market statistics unavailable: breadth, price-limit counts and aggregate turnover were not obtained; missing data is not zero."
+                if self._get_review_language() == "en"
+                else "市场统计未获取成功：涨跌家数、涨跌停数量和全市场成交额暂不可用；缺失不代表数值为0。") if self.profile.has_market_stats and not stats_available else ""
         stats_block = ""
         sector_block = ""
         data_limits_block = ""
         if review_language == "en":
-            if self.profile.has_market_stats:
+            if stats_available:
                 stats_block = f"""## Market Breadth
 - Advancers: {overview.up_count} | Decliners: {overview.down_count} | Flat: {overview.flat_count}
 - Limit-up: {overview.limit_up_count} | Limit-down: {overview.limit_down_count}
@@ -1700,7 +1710,7 @@ Industry lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}
 Concept leading: {top_concepts_text if top_concepts_text else "N/A"}
 Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 
-            data_limit_lines = []
+            data_limit_lines = [missing_notice] if missing_notice else []
             if not self.profile.has_market_stats:
                 data_limit_lines.append(
                     "- Market breadth, aggregate turnover, participation, and fund-flow signals are not available for this market."
@@ -1710,7 +1720,7 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
             if data_limit_lines:
                 data_limits_block = "## Data Limits\n" + "\n".join(data_limit_lines)
         else:
-            if self.profile.has_market_stats:
+            if stats_available:
                 stats_block = f"""## 市场概况
 - 上涨: {overview.up_count} 家 | 下跌: {overview.down_count} 家 | 平盘: {overview.flat_count} 家
 - 涨停: {overview.limit_up_count} 家 | 跌停: {overview.limit_down_count} 家
@@ -1723,7 +1733,7 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 概念领涨: {top_concepts_text if top_concepts_text else "暂无数据"}
 概念领跌: {bottom_concepts_text if bottom_concepts_text else "暂无数据"}"""
 
-            data_limit_lines = []
+            data_limit_lines = [missing_notice] if missing_notice else []
             if not self.profile.has_market_stats:
                 data_limit_lines.append("- 该市场暂无涨跌家数、涨跌停、成交额汇总、参与度或资金流信号。")
             if not self.profile.has_sector_rankings:

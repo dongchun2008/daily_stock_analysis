@@ -571,6 +571,7 @@ def _run_market_review_with_shared_lock(
     run_market_review_func: Callable[..., Any],
     **kwargs: Any,
 ) -> Any:
+    from src.market_deadline import run_bounded_market_review
     from src.core.market_review_lock import (
         release_market_review_lock,
         try_acquire_market_review_lock,
@@ -584,7 +585,7 @@ def _run_market_review_with_shared_lock(
     try:
         params = dict(kwargs)
         params.setdefault("config", config)
-        return run_market_review_func(**params)
+        return run_bounded_market_review(run_market_review_func, **params)
     finally:
         release_market_review_lock(lock_token)
 
