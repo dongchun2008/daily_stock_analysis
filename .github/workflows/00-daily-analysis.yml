@@ -1,9 +1,8 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
-  schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+  # 正式定时分析与邮件统一由VPS负责，避免云端使用不同模型/市场配置重复发送。
+  # 保留手工入口作为维护用途；GitHub工作流同时保持disabled_manually。
   
   # 手动触发
   workflow_dispatch:

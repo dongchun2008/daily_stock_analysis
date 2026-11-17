@@ -184,6 +184,7 @@ def run_market_review(
     save_report_file: bool = True,
     persist_history: bool = True,
     trigger_source: str = "cli",
+    per_market_timeout_seconds: Optional[float] = None,
 ) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
@@ -221,6 +222,17 @@ def run_market_review(
         persist_region,
     )
 
+    def checkpoint(operation, market):
+        try:
+            if per_market_timeout_seconds is not None:
+                from src.market_deadline import run_market_checkpoint
+                return run_market_checkpoint(operation, region=market)
+            return operation()
+        except Exception as exc:
+            logger.warning('[MarketReview] action=checkpoint_failed region=%s error_type=%s',
+                           market, type(exc).__name__)
+            return None
+
     try:
         if len(run_markets) > 1:
             # 多市场顺序执行，合并报告
@@ -244,7 +256,14 @@ def run_market_review(
                     region=mkt,
                     config=runtime_config,
                 )
-                review_result = mkt_analyzer.run_daily_review_with_snapshot()
+                if per_market_timeout_seconds is not None:
+                    from src.market_deadline import run_market_region_bounded
+                    review_result = run_market_region_bounded(
+                        mkt_analyzer.run_daily_review_with_snapshot,
+                        region=mkt, seconds=per_market_timeout_seconds,
+                    )
+                else:
+                    review_result = mkt_analyzer.run_daily_review_with_snapshot()
                 mkt_report = review_result.report
                 _collect_market_light_snapshot(
                     market_light_snapshots,
@@ -258,6 +277,21 @@ def run_market_review(
                 )
                 if mkt_report:
                     parts.append(f"{review_text[title_key]}\n\n{mkt_report}")
+                    # Preserve each completed market before starting the next one.
+                    checkpoint_payload = market_review_payloads[mkt]
+                    if save_report_file:
+                        checkpoint(lambda: notifier.save_report_to_file(
+                            mkt_report,
+                            f"market_review_{mkt}_{datetime.now().strftime('%Y%m%d')}.md",
+                        ), mkt)
+                    if persist_history:
+                        checkpoint(lambda: _persist_market_review_history(
+                            review_report=mkt_report, markdown_report=mkt_report,
+                            region=mkt, config=runtime_config,
+                            query_id=history_query_id + '_' + mkt,
+                            market_light_snapshots={mkt: market_light_snapshots.get(mkt, {})},
+                            market_review_payload=checkpoint_payload,
+                        ), mkt)
             if parts:
                 review_report = f"\n\n---\n\n{review_text['separator']}\n\n".join(parts)
             else:
@@ -282,7 +316,14 @@ def run_market_review(
                 region=run_region,
                 config=runtime_config,
             )
-            review_result = market_analyzer.run_daily_review_with_snapshot()
+            if per_market_timeout_seconds is not None:
+                from src.market_deadline import run_market_region_bounded
+                review_result = run_market_region_bounded(
+                    market_analyzer.run_daily_review_with_snapshot,
+                    region=run_region, seconds=per_market_timeout_seconds,
+                )
+            else:
+                review_result = market_analyzer.run_daily_review_with_snapshot()
             review_report = review_result.report
             market_light_snapshots = {}
             _collect_market_light_snapshot(
@@ -306,6 +347,9 @@ def run_market_review(
                 language=getattr(runtime_config, "report_language", "zh"),
                 root_title=review_text["root_title"],
             )
+            if any(p.get('status') == 'partial' for p in market_review_payloads.values()):
+                market_review_payload['status'] = 'partial'
+                market_review_payload['warnings'] = ['one_or_more_market_regions_failed']
             markdown_report = _render_market_review_payload_markdown(
                 market_review_payload,
                 wrapper_title=review_text["root_title"],
@@ -469,7 +513,13 @@ def _coerce_market_review_payload(
 ) -> Dict[str, Any]:
     payload = getattr(review_result, "structured_payload", None)
     if isinstance(payload, dict) and payload:
+        if "[dsa-generation-status]: # (fallback_template)" in (report or ""):
+            return {**payload, "status": "partial", "warnings": ["llm_template_fallback"]}
         return payload
+    if "[dsa-generation-status]: # (fallback_template)" in (report or ""):
+        return {"version": 1, "kind": MARKET_REVIEW_REPORT_TYPE, "region": region,
+                "status": "partial", "warnings": ["llm_template_fallback"],
+                "markdown_report": report or ""}
     return {
         "version": 1,
         "kind": MARKET_REVIEW_REPORT_TYPE,
@@ -793,7 +843,10 @@ def _persist_market_review_history(
         from src.storage import DatabaseManager
 
         report_language = normalize_report_language(getattr(config, "report_language", "zh"))
+        partial = bool(market_review_payload and market_review_payload.get('status') == 'partial')
         summary = _summarize_market_review(review_report, report_language)
+        if partial:
+            summary = '大盘复盘未完成：包含失败/超时市场，详见报告中的提示。'
         if report_language == "en":
             stock_name = "Market Review"
             operation_advice = "View review"
@@ -837,6 +890,7 @@ def _persist_market_review_history(
             region=region,
             report_language=report_language,
             diagnostic_snapshot=diagnostic_snapshot,
+            **({'partial': True} if partial else {}),
         )
 
         db = DatabaseManager.get_instance()
@@ -883,6 +937,7 @@ def _build_market_review_context_overview(
     region: str,
     report_language: str,
     diagnostic_snapshot: Optional[Dict[str, Any]],
+    partial: bool = False,
 ) -> Dict[str, Any]:
     """Build a low-sensitivity overview block for market-review run-flow rendering."""
     warnings: list[str] = []
@@ -910,7 +965,7 @@ def _build_market_review_context_overview(
         else "시황 리뷰" if report_language == "ko"
         else "大盘复盘"
     )
-    return {
+    overview = {
         "pack_version": "market_review/1.0",
         "created_at": datetime.now().isoformat(),
         "subject": {
@@ -939,6 +994,12 @@ def _build_market_review_context_overview(
             "missing": 0,
         },
     }
+    if partial:
+        warnings.append('market_review_partial')
+        overview['blocks'][0]['status'] = 'partial'
+        overview['counts'].update(available=0, partial=1)
+        overview['data_quality'].update(level='poor', overall_score=0, available=0, missing=1)
+    return overview
 
 
 def _summarize_market_review(review_report: str, report_language: str) -> str:

@@ -810,7 +810,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "[大盘] %s action=generate_review status=fallback_template reason=no_analyzer",
                 self._log_context(),
             )
-            return self._generate_template_review(overview, news)
+            return ('[dsa-generation-status]: # (fallback_template)\n\n'
+                    '> AI生成未完成：以下为模板兜底，不代表完整AI复盘。\n\n'
+                    + self._generate_template_review(overview, news))
 
         # 构建 Prompt
         prompt = self._build_review_prompt(overview, news)
@@ -900,7 +902,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "[大盘] %s action=generate_review status=fallback_template reason=empty_llm_response",
             self._log_context(),
         )
-        return self._generate_template_review(overview, news)
+        return ('[dsa-generation-status]: # (fallback_template)\n\n'
+                    '> AI生成未完成：以下为模板兜底，不代表完整AI复盘。\n\n'
+                    + self._generate_template_review(overview, news))
 
     def _get_analyzer_generation_backend_config_error(self) -> Optional[GenerationError]:
         """Return analyzer backend config errors without relying on dynamic mock attributes."""

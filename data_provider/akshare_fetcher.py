@@ -65,6 +65,7 @@ SINA_REALTIME_ENDPOINT = "hq.sinajs.cn/list"
 TENCENT_REALTIME_ENDPOINT = "qt.gtimg.cn/q"
 _AKSHARE_HISTORY_CALL_TIMEOUT = 30.0
 _AKSHARE_MARKET_STATS_CALL_TIMEOUT = 30.0
+_AKSHARE_CHIP_CALL_TIMEOUT = 30.0
 _AKSHARE_TIMEOUT_PROCESS_JOIN_GRACE = 1.0
 _AKSHARE_TIMEOUT_PROCESS_START_METHOD = "spawn"
 
@@ -1859,7 +1860,10 @@ class AkshareFetcher(BaseFetcher):
             import time as _time
             api_start = _time.time()
             
-            df = ak.stock_cyq_em(symbol=stock_code)
+            df = _akshare_call_with_timeout(
+                ak.stock_cyq_em, symbol=stock_code,
+                timeout=_AKSHARE_CHIP_CALL_TIMEOUT, call_name="ak.stock_cyq_em",
+            )
             
             api_elapsed = _time.time() - api_start
             
