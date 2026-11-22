@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date
 from typing import Any, Dict, Optional
 
 from sqlalchemy import desc
@@ -134,4 +135,17 @@ def _extract_region_snapshot(raw_context_snapshot: Any, region: str) -> Optional
     if not isinstance(snapshots, dict):
         return None
     snapshot = snapshots.get(region)
+    if region=='us' and isinstance(snapshot,dict):
+        review=payload.get('market_review_payload')
+        if not isinstance(review,dict):return None
+        markets=review.get('markets')
+        if isinstance(markets,dict):review=markets.get('us',{})
+        if not isinstance(review,dict):return None
+        # Old histories used the report-local date for US trade_date. Only
+        # compare snapshots whose parent report proves the NY cash session.
+        cash_date=review.get('cash_session_date')
+        try:
+            if not isinstance(cash_date,str) or date.fromisoformat(cash_date).isoformat()!=cash_date:return None
+        except ValueError:return None
+        if cash_date!=snapshot.get('trade_date'):return None
     return snapshot if isinstance(snapshot, dict) else None

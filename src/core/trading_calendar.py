@@ -284,6 +284,35 @@ def get_effective_trading_date(
         return fallback_date
 
 
+def get_completed_daily_sessions(
+    market: str, current_time: Optional[datetime] = None,
+    *, publication_delay: timedelta = timedelta(0),
+) -> Optional[Tuple[date, date]]:
+    """Return (previous, latest) completed sessions; never guess on calendar failure."""
+    if not _XCALS_AVAILABLE or market not in MARKET_EXCHANGE:
+        return None
+    market_now = get_market_now(market, current_time=current_time)
+    try:
+        cal = xcals.get_calendar(MARKET_EXCHANGE[market])
+        session = cal.date_to_session(market_now.date(), direction="previous")
+        close = _as_market_datetime(cal.session_close(session), MARKET_TIMEZONE[market])
+        if close is None:
+            return None
+        if market_now < close + publication_delay:
+            session = cal.previous_session(session)
+        return cal.previous_session(session).date(), session.date()
+    except Exception as exc:
+        logger.warning("trading_calendar.get_completed_daily_sessions unavailable: %s", exc)
+        return None
+
+
+def get_us_completed_cash_sessions(
+    current_time: Optional[datetime] = None,
+) -> Optional[Tuple[date, date]]:
+    """Wait 15 minutes after the NYSE close for the daily bar publication."""
+    return get_completed_daily_sessions("us", current_time, publication_delay=timedelta(minutes=15))
+
+
 def resolve_historical_daily_bar_date(
     market: Optional[str],
     target_date: date,
@@ -644,15 +673,15 @@ def compute_effective_region(
     Compute effective market review region given config and open markets.
 
     Args:
-        config_region: From MARKET_REVIEW_REGION ('cn' | 'hk' | 'us' | 'jp' | 'kr' | 'both' or comma subset)
+        config_region: From MARKET_REVIEW_REGION ('cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'both' or comma subset)
         open_markets: Markets open today
 
     Returns:
         None: caller uses config default (check disabled)
         '': all relevant markets closed, skip market review
-        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'both': effective subset for today
+        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'both': effective subset for today
     """
-    markets = ("cn", "hk", "us", "jp", "kr")
+    markets = ("cn", "hk", "us", "jp", "kr", "tw")
     normalized = (config_region or "cn").strip().lower()
     if not normalized:
         normalized = "cn"

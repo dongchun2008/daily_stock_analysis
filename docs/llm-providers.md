@@ -24,28 +24,11 @@ Generation backend 配置是更外层的运行时选择契约。Phase 4 支持 `
 
 生成后端状态接口与 Web 面板会把轻量检查和冒烟测试分开展示：快速检查只读取已保存 `.env`、运行时兜底值和当前草稿，不写配置、不重载运行时，也不发起真实模型请求；只有 JSON 冒烟测试会使用固定的 JSON 提示词和 schema 发起真实请求。`health_status` 与 `last_error_code/message` 是本次计算结果，不表示历史最后错误。本地 CLI preset 的 `supports_tools=false` 仅表示不支持 DSA Agent 工具调用链路，不代表普通文本生成不可用。
 
-Phase 6a Tool Surface 是 AgentBackend 的唯一内部工具面：统一 DSA 工具 schema、public descriptor、MCP-compatible descriptor、scope guard、结构化错误、审计摘要和脱敏诊断。stock-scoped 工具调用必须显式传入 `ToolAccessContext.stock_scope`；有 `stock_code` 参数但未声明 stock scope 的工具会 fail-closed。Phase 6 的 Codex App Server adapter 只通过该 Tool Surface 执行工具；它不把 `codex_cli` generation backend、MCP server、SDK 或最终文本 fallback 当成 Agent 工具成功。
+Phase 6a Tool Surface 保留共享内部工具边界：统一 DSA 工具 schema、public descriptor、MCP-compatible descriptor、scope guard、结构化错误、审计摘要和脱敏诊断。stock-scoped 工具调用必须显式传入 `ToolAccessContext.stock_scope`；有 `stock_code` 参数但未声明 stock scope 的工具会 fail-closed。保留该共享边界；`codex_cli` generation backend、MCP server、SDK 或最终文本 fallback 不作为 Agent 工具成功。
 
-## Codex App Server 问股边界
+## Codex App Server 问股退役
 
-`AGENT_BACKEND=codex_app_server` 是现有问股 Chat 的实验运行方式，不是新的 provider 模型渠道，也不改变 `GENERATION_BACKEND`。Web 中在「设置 → Agent 设置 → 问股生成方式」选择后，必须使用 `AGENT_ARCH=single` 和大于 0 的整体时限。设置页只检查配置、Codex 命令和所需 App Server 协议是否允许尝试；保存后用户可直接提问，第一次问题就是第一次真实执行。`auto`（推荐）和 `litellm` 始终保持原有 LiteLLM 问股路径。
-
-- DSA 使用 [Codex App Server v2](https://developers.openai.com/codex/app-server/) 的 JSONL stdio、ephemeral thread 和 experimental dynamic tools，并通过 `turn/interrupt` 处理 Chat 取消。2026-07-15 的验收版本为 `codex-cli 0.144.3`，不据此硬编码最低版本。
-- Codex 必须安装并登录在运行 DSA 后端的设备；DSA 不读取或保存 Codex 凭据。Docker、远程服务器与 Desktop 的 PATH 和登录态相互独立。
-- Phase 6 Codex App Server Agent 当前支持 macOS、Linux 和完整运行于 WSL 的 DSA 后端，暂不支持原生 Windows；这不影响 Phase 2 `codex_cli` GenerationBackend 的 Windows 支持。
-- Codex 当前只开放已保存分析上下文、全局回测汇总和策略回测汇总的只读查询；本期只验证这三个工具的独立进程、停止、超时和回收闭环。实时行情、新闻、市场热点、技术指标重算、个股回测明细和持仓工具未纳入本期验证，因此不会暴露给 Codex；需要这些能力时应选择「默认模型」。明确股票代码或 Web 唯一匹配的股票只为已开放的历史分析上下文工具建立股票范围，跨市场同名等歧义不会猜测。
-- 问股历史的 LLM 压缩仅用于「默认模型」。Codex 始终使用最近 20 条用户可见对话，不会调用 `AGENT_LITELLM_MODEL` 生成摘要；用户已保存的压缩配置会保留，切回默认模型后继续生效。
-- 当前只支持 single-agent Chat，不支持 Codex Multi Agent / Codex Deep Research；现有 LiteLLM Multi Agent 和 Deep Research 不受影响。
-- cheap status 不发模型请求，只检查生产路径依赖的 App Server schema 能力且不绑定武断最低版本。仓库中的 `scripts/codex_app_server_gate_a.py` 仅用于维护者可行性验收，不是设置页按钮或生产 API；普通用户的第一个真实问题就是首次真实执行。
-- 用户停止 Codex 问股时，Web 会先显示“正在停止”；后端中断 Codex turn，并终止、回收本轮独立运行的工具进程。只有 Codex 与工具进程都已退出，原 SSE 请求才返回最终“已停止”。超时和客户端断开遵守相同的清理边界，不会把仍在后台运行的任务当成已经结束。默认 LiteLLM Agent 行为保持不变。
-- 基础状态只表达本机“可以尝试”，不检查登录、模型或真实工具闭环，也不缓存成功证据。正式 Chat 由服务端选择实际 backend；上下文准备和用户消息保存完成后发出唯一 `accepted` 事件，再启动模型。Web 在 `accepted` 前保留输入、股票范围、追问上下文和技能选择，并以 `accepted.backend` 决定停止方式。Codex 的累计输出、事件和工具调用均受整轮预算约束，工具调用数沿用 `AGENT_MAX_STEPS`。
-- Codex 不是离线模型；股票代码、新闻、持仓上下文及脱敏工具结果可能由 Codex 自身配置的服务处理。
-
-本 PR smoke 验证版本为 `claude 2.1.177 (Claude Code)` 与 `opencode 1.17.11`，不声明更宽最低版本。如果用户安装的 CLI 不支持这些固定 preset 参数或非交互输出契约，DSA 会返回结构化 `capability_unsupported`、`cli_contract_unsupported`、`invalid_json`、`schema_validation_failed` 或对应 backend error，并在配置 backend fallback 时回退到 `litellm`。
-
-本地 CLI Backend 不等于离线模型。Docker、云服务器和 CI 不天然拥有本机 CLI 登录态；macOS 从 Finder/Dock 启动桌面端时不继承 shell PATH，打包桌面端会在启动后端时补入常见 Homebrew 路径，如果设置检查仍提示找不到 CLI 可执行文件，需要完全退出并重开 DSA。DSA 不读取 Codex/Claude/OpenCode credential 文件，也不为 OpenCode 生成或搬运 provider API key；子进程可能按 CLI 自身机制使用本机登录态或配置，股票代码、新闻、持仓上下文、分析 prompt 和报告草稿可能被对应 CLI 背后的服务处理。DSA 默认只继承最小运行环境，并拒绝通配继承 `CLAUDE_*`、`ANTHROPIC_*`、`OPENCODE_*`、provider API key/token/base-url/model env 和 webhook tokens，降低父进程配置泄漏风险；`CODEX_HOME` 仅作为既有 Codex CLI 登录目录兼容的 exact-name 例外保留。
-
-`opencode_cli` 是 experimental/limited generation backend，不支持 OpenCode serve / web / ACP / MCP / attach / `--dangerously-skip-permissions`。DSA 默认使用本机 OpenCode 的默认模型；`OPENCODE_CLI_MODEL` 只是可选模型覆盖值，配置时才传给 OpenCode `--model`。DSA 会在临时 cwd 写入最小项目 `opencode.json`，但 OpenCode resolved config 仍可能包含用户本机全局配置；运行时安全边界同时依赖 `--pure`、env denylist、prompt file 权限和 event extractor fail-closed。
+Codex App Server 问股后端已移除。`AGENT_BACKEND` 仅支持 `auto`（推荐，保持默认 LiteLLM）或 `litellm`。旧 `codex_app_server` 可加载、显示和导出，但执行请求在准备与接受提交前返回 `backend_removed`，不会自动切换模型、账号或 provider。请在「设置 → Agent 设置 → 问股生成方式」主动选择合法值并保存；已有旧值不阻止无关设置保存，显式保存或导入旧值则拒绝且不部分写入。状态与草稿预览只检查配置，不启动 Codex 命令或 schema/version 探针，也不调用模型。历史会话、股票身份、Skill、单/多 Agent 与 provider trace 保持原契约。独立 `GENERATION_BACKEND=codex_cli` 普通报告及其他 generation-only 不受此移除影响，仍需各自 CLI 及其原有依赖。
 
 ## Web 设置页路径
 
@@ -76,6 +59,26 @@ MODELFLARE_KEY=sk-xxx
 
 `gpt-6.1-sol` 是本项目的 Modelflare 默认模型；实际模型列表与可用性以账号权限、控制台和 Web 设置页「测试连接」结果为准。渠道模板仅决定新建配置的初始值，不会改写已保存的渠道、主模型或 fallback。
 
+### x6.ai 聚合平台
+
+[x6.ai 专属注册](https://console.x6pro.io/register?code=zJ2qSdns) · [API 文档](https://x6.ai/zh/docs) · [模型列表](https://x6.ai/zh/models)
+
+在 WebUI「设置 → AI 模型配置 → 快速添加渠道」中选择 `x6.ai`，可点击下拉框旁的「注册 x6.ai」创建账号；填写自己的 API Key，使用「获取模型」选择当前账号可用的模型，再测试连接。默认 Base URL 为 `https://api.x6.ai/v1`，接口按服务商提供的 OpenAI-compatible Chat Completions 文档配置。该预设不会改写已有用户渠道。
+
+本地或 Docker 也可配置：
+
+```env
+LLM_CHANNELS=x6ai
+LLM_X6AI_PROTOCOL=openai
+LLM_X6AI_BASE_URL=https://api.x6.ai/v1
+LLM_X6AI_API_KEY=sk-your-own-key
+LLM_X6AI_MODELS=openai/anthropic/claude-haiku-5-5-discount
+```
+
+模型仅为示例，需从账号模型列表获取并测试连接。x6.ai 的 `vendor/model` ID 必须保留：WebUI「获取模型」会添加一次 `openai/` 路由层，例如 `anthropic/…` 保存为 `openai/anthropic/…`，`openai/…` 保存为 `openai/openai/…`。手动配置推荐复制获取模型后的完整值；已有配置不会被自动重写。
+
+GitHub Actions 中将 `LLM_CHANNELS=x6ai`、协议、地址和模型配置为 Variables，`LLM_X6AI_API_KEY` 或 `LLM_X6AI_API_KEYS` 配置为 Secrets；每日分析工作流已透传该渠道全部字段。Docker / Desktop 复用相同配置与 WebUI。模型目录不保证当前 Key 对每个模型都有调用权限；以测试连接结果为准，失败时可换用已验证模型。测试用 Key 不应提交到仓库。
+
 ### DeepSeek 官方渠道
 
 ```env
@@ -95,7 +98,7 @@ LLM_MY_PROXY_PROTOCOL=openai
 LLM_MY_PROXY_API_SURFACE=chat_completions
 LLM_MY_PROXY_BASE_URL=https://your-proxy.example.com/v1
 LLM_MY_PROXY_API_KEY=sk-xxx
-LLM_MY_PROXY_MODELS=gpt-5.5,claude-sonnet-4-6
+LLM_MY_PROXY_MODELS=gpt-6.1-sol,claude-sonnet-4-6
 ```
 
 OpenAI-compatible Base URL 只填到服务商兼容入口，不额外拼接 `/chat/completions`。本地 `.env`、Docker 和自托管脚本可以直接使用自定义 channel；GitHub Actions 需要 workflow 显式透传同名 `LLM_MY_PROXY_*` 变量。
@@ -123,21 +126,21 @@ LITELLM_FALLBACK_MODELS=openai/gpt-5.6-terra,openai/gpt-5.6-luna
 | 服务商 | 渠道名 | 协议 | Base URL | 模型示例 |
 | --- | --- | --- | --- | --- |
 | Modelflare | `modelflare` | `openai` | `https://modelflare.dev/v1` | `gpt-6.1-sol`（以账号可用模型为准） |
-| AIHubmix | `aihubmix` | `openai` | `https://aihubmix.com/v1` | `gpt-5.5,claude-sonnet-4-6,gemini-3.1-pro-preview` |
-| OpenAI | `openai` | `openai` | `https://api.openai.com/v1` | `gpt-5.5,gpt-5.4-mini` |
+| AIHubmix | `aihubmix` | `openai` | `https://aihubmix.com/v1` | `gpt-6.1-sol,claude-sonnet-4-6,gemini-3.6-flash` |
+| OpenAI | `openai` | `openai` | `https://api.openai.com/v1` | `gpt-6.1-sol,gpt-6.1-terra` |
 | DeepSeek | `deepseek` | `deepseek` | `https://api.deepseek.com` | `deepseek-v4-flash,deepseek-v4-pro` |
-| Gemini | `gemini` | `gemini` | 留空 | `gemini-3.1-pro-preview,gemini-3-flash-preview` |
+| Gemini | `gemini` | `gemini` | 留空 | `gemini-3.6-flash,gemini-3.5-flash-lite` |
 | Anthropic Claude | `anthropic` | `anthropic` | 留空 | `claude-sonnet-4-6,claude-opus-4-7` |
 | Kimi / Moonshot | `moonshot` | `openai` | `https://api.moonshot.cn/v1` | `kimi-k2.6,kimi-k2.5` |
 | 通义千问 / DashScope | `dashscope` | `openai` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen3.6-plus,qwen3.6-flash` |
 | 智谱 GLM | `zhipu` | `openai` | `https://open.bigmodel.cn/api/paas/v4` | `glm-5.1,glm-4.7-flash` |
-| MiniMax | `minimax` | `openai` | `https://api.minimax.io/v1` | `MiniMax-M3,MiniMax-M2.7,MiniMax-M2.7-highspeed` |
+| MiniMax | `minimax` | `openai` | `https://api.minimax.io/v1` | `MiniMax-M3.1-Flash,MiniMax-M3` |
 | 小米 MiMo | `mimo` | `openai` | 官方控制台提供（Actions 默认未映射） | 官方文档/控制台为准 |
 | 火山方舟 / 豆包 | `volcengine` | `openai` | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-6-251015,doubao-seed-1-6-thinking-251015` |
 | 硅基流动 / SiliconFlow | `siliconflow` | `openai` | `https://api.siliconflow.cn/v1` | `deepseek-ai/DeepSeek-V3.2,Qwen/Qwen3-235B-A22B-Thinking-2507` |
 | OpenRouter | `openrouter` | `openai` | `https://openrouter.ai/api/v1` | `~anthropic/claude-sonnet-latest,~openai/gpt-latest` |
-| Requesty | `requesty` | `openai` | `https://router.requesty.ai/v1`（EU：`https://router.eu.requesty.ai/v1`） | `claude-sonnet-4-6,gpt-5.4` |
-| Anspire Open（兼容） | `anspire` | `openai` | `https://open-gateway.anspire.cn/v6`（示例） | `Doubao-Seed-2.0-lite,Doubao-Seed-2.0-pro,qwen3.5-flash,MiniMax-M2.7`（示例） |
+| Requesty | `requesty` | `openai` | `https://router.requesty.ai/v1`（EU：`https://router.eu.requesty.ai/v1`） | `claude-sonnet-4-6,gpt-6.1-sol` |
+| Anspire Open（兼容） | `anspire` | `openai` | `https://open-gateway.anspire.cn/v6`（示例） | `Doubao-Seed-2.0-lite,Doubao-Seed-2.0-pro,qwen3.5-flash`（示例） |
 | Ollama | `ollama` | `ollama` | `http://127.0.0.1:11434` | `llama3.2,qwen2.5` |
 
 ## 官方来源与兼容性
@@ -145,14 +148,14 @@ LITELLM_FALLBACK_MODELS=openai/gpt-5.6-terra,openai/gpt-5.6-luna
 | 服务商 | 官方来源 | 兼容说明 |
 | --- | --- | --- |
 | Modelflare | [快速开始](https://docs.modelflare.dev/quickstart/)、[接入端点](https://docs.modelflare.dev/guides/endpoints/)、[模型与分组](https://docs.modelflare.dev/guides/models-and-groups/) | 使用 OpenAI-compatible Base URL `https://modelflare.dev/v1` 和标准 `LLM_MODELFLARE_*` 渠道配置；本项目默认模型为 `gpt-6.1-sol`，模型列表以账号权限与控制台为准。 |
-| OpenAI | [模型列表](https://platform.openai.com/docs/models) | 官方模型页建议从 `gpt-5.5` 开始，低延迟/低成本场景使用 `gpt-5.4-mini` 或 `gpt-5.4-nano`。 |
+| OpenAI | [模型列表](https://platform.openai.com/docs/models) | 官方模型页建议从 `gpt-6.1-sol` 开始，低延迟/低成本场景使用 `gpt-6.1-terra`。 |
 | DeepSeek | [快速开始](https://api-docs.deepseek.com/) | 官方 OpenAI Base URL 为 `https://api.deepseek.com`；`deepseek-chat` / `deepseek-reasoner` 将于 2026-07-24 弃用，当前模板直接使用 `deepseek-v4-flash` / `deepseek-v4-pro`。 |
 | Gemini | [模型列表](https://ai.google.dev/gemini-api/docs/models) | Gemini 3.1 Pro / Gemini 3 Flash 仍为 preview；如需生产稳定性，可在控制台改回 2.5 稳定模型。 |
 | Anthropic Claude | [模型概览](https://docs.anthropic.com/en/docs/about-claude/models/all-models) | Claude 当前 API ID 包含 `claude-sonnet-4-6`、`claude-opus-4-7`；Sonnet 更适合作为默认性价比入口。 |
 | Kimi / Moonshot | [Kimi K2.6 快速开始](https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart)、[模型列表](https://platform.kimi.com/docs/models) | 官方推荐 `kimi-k2.6`；`kimi-k2` 系列将在 2026-05-25 下线，旧 `moonshot-v1-*` 仅保留为稳定旧工作负载选择。 |
 | 通义千问 / DashScope | [文本生成](https://help.aliyun.com/zh/model-studio/text-generation-model/) | 百炼推荐 `qwen3.6-plus`，确认效果后可用 `qwen3.6-flash` 降低成本。 |
 | 智谱 GLM | [模型概览](https://docs.bigmodel.cn/cn/guide/start/model-overview)、[GLM-5.1](https://docs.bigmodel.cn/cn/guide/models/text/glm-5.1) | `glm-5.1` 是当前旗舰；`glm-4.7-flash` 作为轻量/免费模型示例。 |
-| MiniMax | [OpenAI API 兼容](https://platform.minimax.io/docs/api-reference/text-chat)、[获取模型列表](https://platform.minimax.io/docs/api-reference/models/openai/list-models)、[Pricing](https://platform.minimax.io/docs/guides/pricing-paygo) | 官方 OpenAI-compatible Base URL 为 `https://api.minimax.io/v1`，并列出 `MiniMax-M3`（默认，支持图片输入，官方支持最多 1M 输入上下文，pricing 区分 `<=512K` 与 `>512K` 输入两档价格）、`MiniMax-M2.7`、`MiniMax-M2.7-highspeed`，以及 Legacy 模型 `MiniMax-M2.5`。本仓库 fallback 成本估算保守按 `<=512K` 价格档注册 M3，并保留 M2.5 legacy 定价以兼容历史用户配置；中国区 Coding 工具场景可能使用 `.com`/Anthropic 专用入口，以控制台为准。 |
+| MiniMax | [Chat API](https://platform.minimax.io/docs/api-reference/text-chat)、[Models](https://platform.minimax.io/docs/guides/models-intro)、[Pricing](https://platform.minimax.io/docs/guides/pricing-paygo) | New channels recommend `MiniMax-M3.1-Flash` first, then `MiniMax-M3`, using `https://api.minimax.io/v1`. Discovery hides older MiniMax text recommendations without rewriting saved or manual IDs. Flash supports image input, 1,000,000 context tokens and 524,288 output tokens; standard input/output/cache-read prices are $0.15/$0.60/$0.015 per million tokens. Flash uses adaptive thinking by default: do not disable thinking or request effort `none`; supported effort values are `low`, `medium`, `high`, `xhigh`, `max` (default). M3 fallback estimates use the standard <=512K rate ($0.30/$1.20/$0.06); longer prompts and priority requests cost more and are not tiered by this fallback estimator. Legacy pricing remains for saved configurations. Subscription and regional access must be checked with the provider. |
 | 小米 MiMo | 官方文档 / 控制台 | 当前按 OpenAI-compatible 方式接入，Base URL、模型名与权限以 MiMo 官方文档/控制台为准；`mimo` 渠道在仓库默认 workflow 中未显式映射，Actions 使用请按本文“GitHub Actions 配置”补齐自定义映射。 |
 | 火山方舟 / 豆包 | [在线推理（常规）](https://www.volcengine.com/docs/82379/2121998)、[模型列表](https://www.volcengine.com/docs/82379/1949118) | 官方示例使用 `https://ark.cn-beijing.volces.com/api/v3` 与 `doubao-seed-1-6-251015`；如使用 Coding Plan，请改用其专用 Base URL 和模型名，不要套用本表的在线推理模板。 |
 | SiliconFlow | [模型列表](https://docs.siliconflow.cn/quickstart/models)、[获取模型列表 API](https://docs.siliconflow.cn/cn/api-reference/models/get-model-list) | 平台模型实时更新且 `/models` 需要 API Key；模板只给常见新模型示例，保存前建议在 Web 设置页点击「获取模型」确认账号可见性。 |
@@ -168,7 +171,7 @@ LITELLM_FALLBACK_MODELS=openai/gpt-5.6-terra,openai/gpt-5.6-luna
 - OpenAI-compatible provider 的 channel `protocol` 通常是 `openai`。
 - `LLM_<CHANNEL>_API_SURFACE` 默认是 `chat_completions`；Responses-only 模型显式设为 `responses`。Responses 渠道要求协议及每个模型的实际 LiteLLM provider 都是 `openai`；直连 provider 从当前安装的 LiteLLM registry 获取，并由系统配置 API 返回给 Web 编辑器作为共同真源。因此显式 `anthropic/`、`gemini/`、`xai/` 以及未来新增的冲突前缀都会在所有配置入口被一致识别，网关自有的 `deepseek-ai/...`、`Qwen/...` 等带斜杠模型 ID 则会规范化到 `openai/<model>`。同一个规范化公开 alias 不得跨渠道混用 Chat 与 Responses，避免 Router 在不同 Surface deployment 间负载均衡。运行时保留公开模型别名 `openai/<model>`，并通过 LiteLLM 的 `openai/responses/<model>` 桥接调用 `/responses`。
 - 该设计与主流项目的显式路由方式一致：[LiteLLM](https://github.com/BerriAI/litellm/blob/main/litellm/responses/main.py) 提供 Chat-to-Responses bridge，[OpenAI Agents SDK](https://openai.github.io/openai-agents-python/models/) 使用独立 Responses/Chat 模型类，[LangChain](https://docs.langchain.com/oss/python/integrations/chat/openai) 使用 `use_responses_api` 显式选择并仅在已知条件下自动路由。DSA 不在请求失败后猜测 endpoint，避免双请求、重复计费及掩盖真实服务端错误。
-- 运行时模型名通常写成 `openai/<model>`；例如自定义网关里的 `gpt-5.5` 可以作为 `openai/gpt-5.5` 被 LiteLLM 路由。
+- 运行时模型名通常写成 `openai/<model>`；例如自定义网关里的 `gpt-6.1-sol` 可以作为 `openai/gpt-6.1-sol` 被 LiteLLM 路由。
 - `Qwen/...`、`deepseek-ai/...` 这类是服务商或模型仓库组织名前缀，不等同于 LiteLLM provider prefix；不要因为它们包含斜杠就误判为 `provider/model` 路由。
 - Base URL 只填官方或网关给出的兼容入口，通常到 `/v1`、`/api/v3` 或厂商文档指定路径；不要手动追加 `/chat/completions`。
 - 如果使用 YAML 模式，按 LiteLLM `model_list` / `litellm_params` 的原生语义配置；YAML 有效时优先级高于 Channels。

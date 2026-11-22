@@ -54,7 +54,7 @@ PR3 registered-field slice / 阶段性补齐：聚焦 Web 设置页中实际展�
 - 通知路由配置（9 字段）：报告/告警/系统错误渠道路由、去重/冷却、静默时段/时区、最低等级、每日摘要（预留）。
 - 系统运行时（7 字段）：日志级别、调试模式、最大并发、分析间隔、大盘分析开关/市场/配色。
 - AI legacy 与 Anspire 配置：provider 专用多 Key、模型名、温度、Vision 模型、max tokens 与 Anspire LLM 网关字段。
-- 数据源与搜索：TickFlow、SerpAPI、Brave、Bocha、MiniMax、SearXNG 公共实例、BIAS 阈值和 Pytdx 服务器字段。
+- 数据源与搜索：TickPlus（A 股 / ETF 首选推荐，含注册链接）、TickFlow、SerpAPI、Brave、Bocha、MiniMax、SearXNG 公共实例、BIAS 阈值和 Pytdx 服务器字段。
 - 通知高级字段：飞书高级安全/应用字段、Telegram topic、Discord/Slack 高级字段、Pushover、ntfy、Gotify、PushPlus、ServerChan3、AstrBot 和自定义 Webhook 高级模板/鉴权字段。
 
 Issue #1512 收口后，Web 设置页只展示后端配置注册表中的正式字段。未注册的 `.env` key 不再作为普通可编辑设置项展示，避免 raw key、`Auto-inferred field metadata.` 和无 help 按钮的配置项进入中文界面；这些 key 仍可通过 `.env` 文件或导入/导出能力保留和维护。
@@ -97,4 +97,5 @@ Issue #1512 收口后，Web 设置页只展示后端配置注册表中的正式�
 - `SCHEDULE_ENABLED`：WebUI/API/Desktop 长运行进程（包括 `python main.py --serve --schedule`）会在保存后按新值启动或停止 runtime scheduler；重启 `--serve-only` 或 Desktop 进程时也会恢复已启用的 daily jobs，但不会因此立即执行分析。纯 CLI schedule 模式（`python main.py --schedule`）仍按启动时参数和配置运行。
 - `SCHEDULE_TIME`、`SCHEDULE_TIMES`：不是重启必需项。`SCHEDULE_TIMES` 为空时使用 `SCHEDULE_TIME`；已运行的 scheduler 会按新时间重建 daily jobs。
 - `SCHEDULE_RUN_IMMEDIATELY`：schedule 模式启动行为，保存后不会让当前进程立即执行一次分析；手动执行请使用 runtime scheduler 的 run-now API。
+- `SCHEDULE_STARTUP_DEDUP`：纯 CLI schedule 模式（`python main.py --schedule`）启动立即执行的当日去重开关，Web 设置页不直接暴露该键；详见 `docs/full-guide.md` 配置表。
 - runtime scheduler 的 run-now API 只会在没有分析任务运行时接受请求；如果已有分析在执行，会返回忙碌状态，Web 设置页会提示稍后重试。

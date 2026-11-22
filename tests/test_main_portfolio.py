@@ -256,6 +256,9 @@ class MainPortfolioTest(unittest.TestCase):
             analysis_delay=0,
             backtest_enabled=False,
             report_type="simple",
+            feishu_app_id="synthetic-app",
+            feishu_app_secret="synthetic-secret",
+            feishu_folder_token="synthetic-folder",
         )
         result_item = SimpleNamespace(
             code="600519",

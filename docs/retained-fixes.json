@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "fixes": [
+    {"id":"legacy-realtime-volume-shares","status":"retained","reason":"Legacy Sina/Tushare realtime volume is already shares; invalid volume must not discard a valid price.","tests":["tests/test_mail_data_integrity.py"],"upstream_resolution":null},
+    {"id":"us-completed-session-provenance","status":"retained","reason":"Use two completed NYSE sessions with publication delay; disclose collection time/session date and keep VIX separate from equity scoring.","tests":["tests/test_mail_data_integrity.py"],"upstream_resolution":null},
+    {"id":"bounded-market-work-and-checkpoints","status":"retained","reason":"One stalled provider/market must not block all markets or future scheduler runs.","tests":["tests/test_mail_recovery_bounds.py","tests/test_market_review_outer_guard.py"],"upstream_resolution":null},
+    {"id":"truthful-missing-market-statistics","status":"retained","reason":"Missing breadth/turnover is not zero and fallback output is partial.","tests":["tests/test_market_stats_missing.py"],"upstream_resolution":null},
+    {"id":"unused-feishu-sdk-lazy-loading","status":"retained","reason":"Avoid eager unused SDK allocation while preserving webhook and configured app-bot compatibility.","tests":["tests/test_feishu_sdk_lazy_loading.py"],"upstream_resolution":null}
+  ]
+}
