@@ -41,6 +41,13 @@
 - review 反馈后，不接受只在被指出的位置追加局部 patch。作者必须重新检查同一业务语义涉及的所有入口、配置、测试、文档、workflow 和用户可见路径。
 - 如果一个 PR 在多轮 review 后仍持续出现同类契约漂移、重复 fallback、测试绕过真实风险层、PR body 与实际 diff 不一致等问题，维护者可以要求关闭重做，而不是继续逐点 review。
 
+## 1.3 本 fork 的维护修复保留规则
+
+- 合并上游前先读取 `docs/retained-fixes.json` 和 `docs/retained-maintenance.md`，逐项核对尚未在上游解决的修复；不得通过 reset、强制推送或直接覆盖生产只读挂载移除它们。
+- `main` 必须保留本 fork 历史；在维护分支 merge 上游，运行 `python scripts/check_retained_fixes.py` 和相关回归后再发布。
+- 修复只有在记录上游 URL、提交号和验证证据后才能标为 `upstream_verified`；语义回归测试仍须保留。
+- VPS 是唯一定时股票邮件来源，合并上游不得重新启用 GitHub 每日分析 cron。生产密钥、配置、邮件正文和备份禁止入库。
+
 ## 2. AI 协作资产治理
 
 - `AGENTS.md` 是仓库内 AI 协作规则的唯一真源。

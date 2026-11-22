@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-股票智能分析系统 - 大盘复盘模块（支持 A 股 / 港股 / 美股 / 日本 / 韩国）
+股票智能分析系统 - 大盘复盘模块（支持 A 股 / 港股 / 美股 / 日本 / 韩国 / 台股）
 ===================================
 
 职责：
-1. 根据 MARKET_REVIEW_REGION 配置选择市场区域（cn / hk / us / jp / kr / both）
+1. 根据 MARKET_REVIEW_REGION 配置选择市场区域（cn / hk / us / jp / kr / tw / both）
 2. 执行大盘复盘分析并生成复盘报告
 3. 保存和发送复盘报告
 """
@@ -47,6 +47,7 @@ _MARKET_REVIEW_MARKETS = (
     ('us', 'us_title', '美股'),
     ('jp', 'jp_title', '日股'),
     ('kr', 'kr_title', '韩股'),
+    ('tw', 'tw_title', '台股'),
 )
 _MARKET_REVIEW_REGION_ORDER = MARKET_REVIEW_REGION_ORDER
 
@@ -123,6 +124,7 @@ def _get_market_review_text(language: str) -> dict[str, str]:
             "hk_title": "# HK Market Recap",
             "jp_title": "# Japan Market Recap",
             "kr_title": "# Korea Market Recap",
+            "tw_title": "# Taiwan Market Recap",
             "separator": "> Next market recap follows",
         }
     if normalized == "ko":
@@ -134,6 +136,7 @@ def _get_market_review_text(language: str) -> dict[str, str]:
             "hk_title": "# 홍콩 시황 리뷰",
             "jp_title": "# 일본 시황 리뷰",
             "kr_title": "# 한국 시황 리뷰",
+            "tw_title": "# 대만 시황 리뷰",
             "separator": "> 다음 시장 시황 리뷰",
         }
     return {
@@ -144,6 +147,7 @@ def _get_market_review_text(language: str) -> dict[str, str]:
         "hk_title": "# 港股大盘复盘",
         "jp_title": "# 日股大盘复盘",
         "kr_title": "# 韩股大盘复盘",
+        "tw_title": "# 台股大盘复盘",
         "separator": "> 以下为下一市场大盘复盘",
     }
 
@@ -347,9 +351,6 @@ def run_market_review(
                 language=getattr(runtime_config, "report_language", "zh"),
                 root_title=review_text["root_title"],
             )
-            if any(p.get('status') == 'partial' for p in market_review_payloads.values()):
-                market_review_payload['status'] = 'partial'
-                market_review_payload['warnings'] = ['one_or_more_market_regions_failed']
             markdown_report = _render_market_review_payload_markdown(
                 market_review_payload,
                 wrapper_title=review_text["root_title"],
@@ -514,7 +515,8 @@ def _coerce_market_review_payload(
     payload = getattr(review_result, "structured_payload", None)
     if isinstance(payload, dict) and payload:
         if "[dsa-generation-status]: # (fallback_template)" in (report or ""):
-            return {**payload, "status": "partial", "warnings": ["llm_template_fallback"]}
+            warnings=list(dict.fromkeys([*(payload.get('warnings') or []),'llm_template_fallback']))
+            return {**payload, "status": "partial", "warnings": warnings}
         return payload
     if "[dsa-generation-status]: # (fallback_template)" in (report or ""):
         return {"version": 1, "kind": MARKET_REVIEW_REPORT_TYPE, "region": region,
@@ -549,7 +551,7 @@ def _build_combined_market_review_payload(
         payload["root_title"] = title
         payload["markdown_report"] = review_report
         return payload
-    return {
+    combined = {
         "version": 1,
         "kind": MARKET_REVIEW_REPORT_TYPE,
         "region": region,
@@ -559,6 +561,10 @@ def _build_combined_market_review_payload(
         "markets": payloads,
         "markdown_report": review_report,
     }
+    if any(item.get('status')=='partial' for item in payloads.values()):
+        combined['status']='partial'
+        combined['warnings']=sorted({'one_or_more_market_regions_partial',*(warning for item in payloads.values() for warning in item.get('warnings',[]))})
+    return combined
 
 
 def _render_market_review_payload_markdown(
@@ -846,7 +852,10 @@ def _persist_market_review_history(
         partial = bool(market_review_payload and market_review_payload.get('status') == 'partial')
         summary = _summarize_market_review(review_report, report_language)
         if partial:
-            summary = '大盘复盘未完成：包含失败/超时市场，详见报告中的提示。'
+            summary = {
+                'en':'Partial market review: some data or generation steps are unavailable; see report notes.',
+                'ko':'일부 데이터 또는 생성 단계가 불완전합니다. 보고서의 안내를 확인하세요.',
+            }.get(report_language,'大盘复盘部分完成：部分数据或生成步骤不可用，详见报告中的提示。')
         if report_language == "en":
             stock_name = "Market Review"
             operation_advice = "View review"

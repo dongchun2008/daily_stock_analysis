@@ -1,5 +1,7 @@
 # LLM Configuration Guide
 
+> **Platform boundary (2026-11-08):** Gemini API and Vertex AI have different model lifecycles. The Vertex AI `gemini-3.6-flash` placeholder is an input example; [Google Cloud documents](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-6-flash) retirement on 2026-11-19 for that platform. Confirm model availability for your project and region; Gemini API validation does not validate Vertex AI. A DeepSeek key alone infers `deepseek/deepseek-v4-flash`; explicit models and higher-priority configuration still take precedence.
+
 Welcome! Whether you are a beginner newly exposed to AI or a veteran skilled with various APIs, this guide will help you set up Large Language Models (LLMs) quickly.
 
 This project exposes a unified AI model access flow that supports official APIs, OpenAI-compatible platforms, and local models. Under the hood it is powered by [LiteLLM](https://docs.litellm.ai/), but most users only need to think in terms of picking a provider, adding an API key, and optionally choosing a primary model or channels. To cater to different experience levels, we provide a three-tier configuration hierarchy. Choose the method that fits you best.
@@ -48,13 +50,13 @@ AGENT_GENERATION_BACKEND=auto
 - Local CLI `stdout_preview` / `stderr_preview` redact short credential assignments before diagnostics are emitted, regardless of value length. Uppercase environment assignments reuse the child-env fail-closed sensitive-name contract; scalar assignments in JSON, YAML, and ordinary logs use a narrower credential-field allowlist; URLs keep separate userinfo, webhook, and sensitive-parameter rules. Ordinary troubleshooting fields such as `token_budget`, `session_id`, and `sort_key` are not removed merely because their names contain `token`, `session`, or `key`; however, an unquoted sensitive YAML scalar has no reliable same-line boundary, so redaction fails closed from that value through the end of the line and does not preserve later fields on that line.
 - Local CLI default concurrency is 1. Effective local CLI concurrency is `min(LOCAL_CLI_BACKEND_MAX_CONCURRENCY, GENERATION_BACKEND_MAX_CONCURRENCY)` and does not inherit `MAX_WORKERS`.
 - `AGENT_GENERATION_BACKEND=auto` does not inherit local CLI values from `GENERATION_BACKEND`; Agent tool calling remains on LiteLLM. The Web settings page only exposes `auto|litellm`; a hand-written `AGENT_GENERATION_BACKEND=codex_cli|claude_code_cli|opencode_cli` does not enable Agent text-only mode and returns an explicit unsupported tool-calling diagnostic.
-- The Phase 6a DSA Tool Surface remains the only tool-schema, permission, scope-guard, structured-error, audit, and redaction boundary. The Phase 6 Codex AgentBackend can execute tools only through this surface. `codex_cli` / `claude_code_cli` / `opencode_cli` remain generation-only and are never Agent tool fallbacks.
+- The Phase 6a DSA Tool Surface retains tool-schema, permission, scope-guard, structured-error, audit, and redaction support. Default LiteLLM keeps its existing registry/runner tool path; removing the runtime does not rewire tool execution. `codex_cli` / `claude_code_cli` / `opencode_cli` remain generation-only and are never Agent tool fallbacks.
 - The Web settings generation-backend quick check only reads saved `.env`, runtime defaults, and unsaved drafts. It does not write config, reload runtime, or send a real model request; `available` only means the current config can be attempted. JSON smoke test is a separate explicit button that sends one real generation-backend request with a server-owned fixed JSON prompt/schema to verify extractor behavior, JSON contract, timeout, output limits, and usage-unavailable semantics.
 - `GET /api/v1/system/config/generation-backends/status` only reads saved config. Unsaved drafts use `POST /api/v1/system/config/generation-backends/status/preview` or `POST /api/v1/system/config/generation-backends/smoke-test`; masked secrets preserve saved values. `health_status` and `last_error_code/message` describe only the current computation, not persisted historical health.
 
 ### Chat Session State And Upgrades
 
-The server owns the main discussion object and saved Skills. LiteLLM single/existing multi and the Codex single interface consume the same accepted snapshot. Omitted/null Skills inherit saved choices (configuration defaults when unset); explicit `[]` saves a cleared selection and uses built-in defaults, not a non-empty configured selection. Only unique server-index names establish identity. Comparisons do not switch the main object; execution failure/stopping does not undo acceptance. On a state/instance conflict, refresh and retry manually; Web keeps the input and draft selection and does not resend automatically.
+The server owns the main discussion object and saved Skills. LiteLLM single/existing multi consume the same accepted snapshot. Omitted/null Skills inherit saved choices (configuration defaults when unset); explicit `[]` saves a cleared selection and uses built-in defaults, not a non-empty configured selection. Only unique server-index names establish identity. Comparisons do not switch the main object; execution failure/stopping does not undo acceptance. On a state/instance conflict, refresh and retry manually; Web keeps the input and draft selection and does not resend automatically.
 
 Legacy recovery uses explicit codes, not historical names. `Analyze 600519 → switch to CATL by name → risks?` requires confirmation rather than reusing 600519. Startup adds state columns without deleting messages, Skills or reports. Stop the backend before upgrading/rolling back; use SQLite backup or a complete stopped-server backup, not a main-file-only copy with active WAL. Keep configuration, database location and data directory; update matching backend/Web and restart without deleting tables/columns. Rollback preserves added columns and old-code message/Skill writes. Re-upgrade after intervening user messages shows an unconfirmed object until explicitly reconfirmed. Concurrent old/new writers are unsupported. For separate deployments, upgrade backend before Web and roll back Web before backend.
 
@@ -72,35 +74,11 @@ Incidental mentions in ordinary follow-ups do not expand tool scope. Existing st
 
 Current Bot and Web may alternate within the same session instance. After Web confirms an object, an ordinary Bot follow-up uses its strict tool scope; a valid comparison adds participants only for that turn. Both preserve the Web main object, confirmation source/time and state version. Bot does not independently persist a new main object: an explicit switch or an unsafe continuation leaves Web pending reconfirmation rather than claiming the old object remains reliable. Unknown user writes from genuinely old/rollback code still require reconfirmation and are not treated as current state-aware Bot turns. Current Bot commits check the prepared generation, version and latest user anchor; a newer acceptance rejects the stale commit without appending its question or automatically retrying the model. Replies, provider traces and summaries remain bound to the captured instance and actual message source. Delete/recreate rejects late writes from the old instance. A late initial Web list may update presentation but cannot clear a new request/accepted instance or cancel its stream; ordinary missing-session restoration, switching and creation retain their existing behavior.
 
-This does not change model routing, Phase 2 or Codex tool permissions. Affected real Codex paths remain Gate 0B BLOCKED; controlled execution tests do not establish real-runtime safety or upgrades on every platform.
+The session-state contract does not change model routing or Phase 2 generation-only capabilities. The Codex App Server Chat backend has been removed; there is no execution entry point awaiting Gate approval. Historical Gate 0B BLOCKED records do not become passes as a result; controlled execution tests do not establish real-runtime safety or upgrades on every platform.
 
-### Codex Local Agent (Phase 6 Experimental Prototype)
+### Codex App Server Chat Retirement
 
-`AGENT_BACKEND` selects only the runtime for the existing ask-stock Chat. It does not change regular reports, scheduled analysis, market review, the regular Agent analysis pipeline, LiteLLM Multi Agent, or Deep Research:
-
-```env
-# Auto (recommended) never enables experimental Codex; auto and litellm keep the existing route.
-AGENT_BACKEND=auto
-# Explicit opt-in:
-# AGENT_BACKEND=codex_app_server
-# AGENT_ARCH=single
-```
-
-Web setup: open **Settings → Agent → Ask-stock method**, choose **Codex local Agent (experimental)**, keep **Single Agent**, set the overall Agent timeout to a value greater than 0, and save. Settings checks only whether the current configuration, local Codex command, and required App Server protocol allow an attempt; it does not sign in, call a model, or read stock data. Return to Chat and ask directly after saving. The first question is the first real execution. To restore the original behavior, select **Auto (recommended)** and save.
-
-- Codex must be installed and signed in on the device running the DSA backend. DSA does not read or store Codex credentials; the App Server process uses Codex's own sign-in state. Docker, remote servers, and Desktop have separate PATH and sign-in environments. A Desktop backend launched from Finder/Dock only sees the PATH constructed for that process; install Codex CLI where that PATH can find it and fully restart DSA.
-- The Phase 6 Codex App Server Agent currently supports macOS, Linux, and environments where the complete DSA backend runs inside WSL. Native Windows backends are rejected before status probing or transport startup. This does not change the existing Windows generation support for Phase 2 `GENERATION_BACKEND=codex_cli`.
-- Codex currently exposes read-only access only to saved analysis context, overall backtest summaries, and strategy backtest summaries. This phase validates and promises the independent-process, stop, timeout, and cleanup lifecycle only for those three tools. Live quotes, news, market hotspots, technical-indicator recalculation, per-stock backtest details, and portfolio tools were not validated in this phase and are therefore omitted from the Codex tool list; choose **Default model** when you need them. An explicit symbol or one uniquely selected Web stock only establishes the stock scope for the exposed historical-analysis-context tool; DSA does not guess across ambiguous listings.
-- This is not an offline model. Services configured in Codex may process stock symbols, questions, news, position context, and redacted tool results.
-- Codex Chat receives the active trading Skill instructions. Omitting selection inherits the saved session selection (new sessions use defaults); an explicit empty list clears the saved selection and returns to defaults. Skills only interpret saved data from the three read-only tools and cannot expand tool permissions. Missing data or capabilities must be disclosed without claiming complete Skill execution.
-- Only single-agent Chat is supported. Codex Multi Agent and Codex Deep Research are not supported. Existing LiteLLM Multi Agent and Deep Research remain unchanged.
-- Each Chat request creates a new ephemeral App Server thread. DSA retains the existing visible session history and injects it into the next request, but it does not inject LiteLLM provider traces. Web clients do not receive chain-of-thought, raw JSON-RPC, stderr, or complete tool arguments/results; Codex receives only the redacted tool results needed for that turn.
-- When the user stops ask-stock Chat, the page first shows **Stopping**. DSA interrupts the Codex turn and terminates and reaps the independently running tool process for that turn. The original Chat request reports **Stopped** only after both Codex and the tool process have exited. Timeouts and client disconnects use the same cleanup boundary, so a turn is never reported as finished while its background work is still running. This contract applies only to Codex and does not change the default LiteLLM Agent execution path.
-- Codex requires `AGENT_ORCHESTRATOR_TIMEOUT_S` greater than 0 so success, failure, timeout, and stop all reach a bounded end. The existing `0`-disables-timeout behavior remains available only to the default LiteLLM path. Codex rejects 0 during configuration and before execution instead of silently replacing it with 600 seconds.
-- Cheap status checks configuration, executable visibility, version, and the App Server schema capabilities required by the production path without a model request. It does not prove that Codex is signed in, a model is available, or tools can complete. The status says only **Can try**; command, protocol, sign-in, model, and tool failures are classified when the user sends a question. Chat checks status once when loaded and retries only when the user asks it to check again.
-- The server selects the actual backend for each Chat request. It prepares context and persists the user question before emitting the single SSE `accepted` event, and only then starts model execution. Web preserves the input, stock scope, follow-up context, and skill selection until `accepted`, preventing ghost messages when preparation fails. The actual backend in `accepted` determines how Stop works.
-- One bounded turn budget covers cumulative App Server output and event counts. Tool calls use the existing `AGENT_MAX_STEPS` budget, and per-turn state is removed at completion. Tool-process IPC measures raw UTF-8 result bytes rather than JSON-escaped size. A limit breach returns a structured error and reclaims the turn without retrying or switching backends.
-- The integration follows the [Codex App Server v2 documentation](https://developers.openai.com/codex/app-server/) for JSONL stdio, ephemeral `thread/start`, `turn/start` / `turn/interrupt`, and experimental dynamic tools. Local acceptance on 2026-07-15 used `codex-cli 0.144.3`; DSA does not infer a universal minimum version from that observation. Settings decides only whether an attempt is allowed; the user's real question determines final availability.
+The Codex App Server Chat backend has been removed. `AGENT_BACKEND` supports only `auto` (recommended, keeps default LiteLLM) or `litellm`. Existing `codex_app_server` values can be loaded, displayed, and exported, but execution returns `backend_removed` before preparation or acceptance, without switching models, accounts, or providers. In **Settings → Agent → Ask-stock method**, explicitly choose a supported value and save. Unrelated settings can still be saved; explicitly saving or importing the retired value is rejected without partial writes. Status and draft previews inspect configuration only, without launching Codex or schema/version probes or calling models. Historical conversations, stock identity, Skills, single/multi Agent, and provider trace keep their existing contracts. Standalone `GENERATION_BACKEND=codex_cli` reports and other generation-only paths are unaffected and still require their original CLI dependencies.
 
 ### Local CLI Privacy And Boundaries
 
@@ -141,8 +119,8 @@ LITELLM_MODEL=openai/deepseek-ai/DeepSeek-V3
 # Fill in the API Key requested from the official DeepSeek platform
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
 ```
-*Compatibility note: with only this line, the system still defaults to `deepseek/deepseek-chat` and logs a migration warning.*
-`deepseek-chat` / `deepseek-reasoner` still work for compatibility with old configs, but DeepSeek marks them deprecated after 2026/07/24. New configs should migrate through the Web quick channel or explicitly set `LITELLM_MODEL=deepseek/deepseek-v4-flash` for `deepseek-v4-flash` / `deepseek-v4-pro`.
+*With only this line, the system defaults to `deepseek/deepseek-v4-flash`.*
+DeepSeek announced the shutdown of `deepseek-chat` / `deepseek-reasoner` on 2026/07/24; please migrate old configs. New configs should migrate through the Web quick channel or explicitly set `LITELLM_MODEL=deepseek/deepseek-v4-flash` for `deepseek-v4-flash` / `deepseek-v4-pro`.
 
 ### Example 3: Using the Free Gemini API
 ```env
@@ -257,6 +235,10 @@ For the channel named `modelflare`, an omitted or blank Base URL defaults to `ht
 
 Both the client's quick-add registration button and the exclusive registration link in channel details use the app UTM; README links use the github UTM. If a new channel has no key yet, or the primary/fallback model is not declared by an enabled channel, status preview shows the affected configuration fields. Supply the key, select available models or clear invalid fallback selections, then retry. Preview does not rewrite saved settings.
 
+### Example: x6.ai
+
+Select x6.ai in the Web settings, enter your key, discover models and test the connection. For environment variables and GitHub Actions, use the [x6.ai channel example](llm-providers.md#x6ai-聚合平台); the key alone does not enable an explicit channel.
+
 ### Compatibility example: Anspire Responses API (observed GPT-5.6 model names)
 
 ```env
@@ -285,7 +267,7 @@ LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro
 # 3. Channel 2: Configure a common relay/proxy API
 LLM_AIHUBMIX_BASE_URL=https://api.aihubmix.com/v1
 LLM_AIHUBMIX_API_KEY=sk-2222222222222
-LLM_AIHUBMIX_MODELS=gpt-5.5,claude-sonnet-4-6
+LLM_AIHUBMIX_MODELS=gpt-6.1-sol,claude-sonnet-4-6
 
 # 4. [Key Step] Specify the primary model and fallback list
 # Set your primary model:
@@ -293,7 +275,7 @@ LITELLM_MODEL=deepseek/deepseek-v4-flash
 # Optional: set an Agent-only primary model (empty = inherit the primary model)
 AGENT_LITELLM_MODEL=deepseek/deepseek-v4-pro
 # If the primary model crashes, try these fallbacks sequentially:
-LITELLM_FALLBACK_MODELS=openai/gpt-5.4-mini,anthropic/claude-sonnet-4-6
+LITELLM_FALLBACK_MODELS=openai/gpt-6.1-terra,anthropic/claude-sonnet-4-6
 ```
 
 ### Example: Ollama Channel Mode (Local Models, No API Key)
@@ -323,12 +305,12 @@ LITELLM_MODEL=openai/hermes-agent
 
 ### MiniMax Model Naming in Channel Mode
 
-- If you access MiniMax through an OpenAI-compatible channel, enter the model as `minimax/<model-name>` in the channel model list, for example `minimax/MiniMax-M1`.
+- For the official OpenAI-compatible MiniMax channel, use `MiniMax-M3.1-Flash,MiniMax-M3`. Explicit saved provider-prefixed IDs such as `minimax/MiniMax-M3.1-Flash` remain supported.
 - The Web settings page now keeps that value unchanged in Primary, Agent Primary, Fallback, and Vision selectors instead of rewriting it to `openai/minimax/<model-name>`.
 
 ### Default-Model Ask-Stock / LiteLLM Compatibility Notes
 
-- With `AGENT_BACKEND=auto|litellm`, ask-stock follows the same three-tier runtime priority as the regular analyzer: `LITELLM_CONFIG` (LiteLLM YAML) > `LLM_CHANNELS` > legacy provider keys. Once an upper tier is valid and active, lower tiers are ignored for that request; Codex does not use this model route.
+- With `AGENT_BACKEND=auto|litellm`, ask-stock follows the same three-tier runtime priority as the regular analyzer: `LITELLM_CONFIG` (LiteLLM YAML) > `LLM_CHANNELS` > legacy provider keys. Once an upper tier is valid and active, lower tiers are ignored for that request.
 - In YAML mode, the Agent reuses LiteLLM `model_list` / `model_name` routing semantics directly. In channel mode, it first reads `AGENT_LITELLM_MODEL`; when that is empty it inherits `LITELLM_MODEL`, then continues through `LITELLM_FALLBACK_MODELS`.
 - If you do not use YAML or Channels, leave `AGENT_LITELLM_MODEL` empty, and still rely on legacy provider env vars, the ask-stock Agent continues to inherit them: `GEMINI_API_KEY + GEMINI_MODEL` -> `gemini/<model>`, `OPENAI_API_KEY + OPENAI_MODEL` -> `openai/<model>`, and `ANTHROPIC_API_KEY + ANTHROPIC_MODEL` -> `anthropic/<model>`.
 - This fix only improves two things: preserving the backend's real failure reason and returning a more specific diagnostic when no usable Agent LLM is configured. It does **not** silently delete, clear, migrate, or rewrite your existing `GEMINI_*`, `OPENAI_*`, `ANTHROPIC_*`, or `LITELLM_*` settings.
@@ -337,7 +319,7 @@ LITELLM_MODEL=openai/hermes-agent
 
 ### Ask-Stock Visible Chat Context Compression
 
-By default, ask-stock injects only the 20 most recent visible messages. The following LLM compression applies only to **Default model** ask-stock: Codex Agent always uses the 20 most recent user-visible messages and never calls `AGENT_LITELLM_MODEL` to summarize history. Switching to Codex does not clear the saved compression setting; it takes effect again after switching back to **Default model**.
+By default, ask-stock injects only the 20 most recent visible messages. Enable LLM context compression to reduce long-conversation token usage:
 
 ```env
 AGENT_CONTEXT_COMPRESSION_ENABLED=true
@@ -356,7 +338,7 @@ For the single-agent ask-stock path, the backend also keeps a provider-aware tra
 - Moonshot officially documents Kimi as an OpenAI-compatible API, with `https://api.moonshot.ai/v1` as the base URL: <https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart>
 - LiteLLM officially requires the `openai/` prefix for OpenAI-compatible model routing: <https://docs.litellm.ai/docs/providers/openai_compatible>
 - Moonshot's compatibility docs distinguish two fixed values: **thinking mode must use `1.0`, while non-thinking mode must use `0.6`**; other values are rejected by the API: <https://platform.moonshot.ai/docs/guide/compatibility#parameters-differences-in-request-body>
-- The OpenAI Chat Completions API treats `temperature` as optional. For GPT-5 / o-series style models that only accept the provider default temperature, this project omits `temperature` at request time instead of rewriting your saved `LLM_TEMPERATURE`: <https://platform.openai.com/docs/api-reference/chat/create>
+- The OpenAI Chat Completions API treats `temperature` as optional. For GPT-5 / GPT-6 / o-series style models that only accept the provider default temperature, this project omits `temperature` at request time instead of rewriting your saved `LLM_TEMPERATURE`: <https://platform.openai.com/docs/api-reference/chat/create>
 - The current runtime dependency constraint in this repository is `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0` (see `requirements.txt`); this compatibility fix is regression-covered under that constraint across the main analyzer, market review, direct Agent LiteLLM calls, and the system-settings channel connectivity test path.
 - This repository therefore normalizes `kimi-k2.6` and `kimi-k2.6-*` right before dispatch based on the **actual request mode**: default / thinking requests use `temperature=1.0`; if your LiteLLM YAML route alias explicitly sets `litellm_params.extra_body.thinking.type: disabled` (or an equivalent non-thinking override), it automatically switches to `temperature=0.6`. Your saved `LLM_TEMPERATURE` value in `.env` or the Web settings is not rewritten.
 - If a compatible platform returns an explicit parameter error for a not-yet-profiled model, such as unsupported `temperature`, default-only `1.0`, or unsupported `top_p`, the runtime repairs the **current request** and retries once. The strategy is cached only in the current process after the retry succeeds; it is never written back to `.env`, and a service restart re-evaluates the configured rules normally.
@@ -489,7 +471,7 @@ Certain specific features in our system (like uploading a stock chart screenshot
 
 ```env
 # Specify your dedicated vision model name
-VISION_MODEL=openai/gpt-5.5
+VISION_MODEL=openai/gpt-6.1-sol
 # Make sure to provide its corresponding provider API KEY (e.g., OPENAI_API_KEY):
 # OPENAI_API_KEY=xxx
 ```
@@ -513,11 +495,11 @@ Afraid you got the config wrong? Type the following commands in your terminal to
 
 | Weird Error You Got? | Likely Culprit | How to Fix It? |
 |----------------------|----------------|----------------|
-| **The UI says the primary model is not configured** | The system doesn't know which provider/model you want to use. | Add a clear instruction in `.env`: `LITELLM_MODEL=provider/your_model_name`. Example: `openai/gpt-5.5`. |
+| **The UI says the primary model is not configured** | The system doesn't know which provider/model you want to use. | Add a clear instruction in `.env`: `LITELLM_MODEL=provider/your_model_name`. Example: `openai/gpt-6.1-sol`. |
 | **I added multiple provider Keys, why is only one working?** | You mixed the **Simple Mode** and **Channels Mode**! | Choose one path. For simple setups, delete anything starting with `LLM_CHANNELS`. To use multi-model fallbacks, migrate all your Keys into the `LLM_CHANNELS` setup. |
 | **Returns 400, 401, or Invalid API Key** | The API Key is wrong, copied incompletely, account lacks credits, or you mistyped the model name (extremely common). | 1. Ensure there are no spaces at the start/end of your Key.<br> 2. Ensure your Base URL ends with `/v1`.<br> 3. Check if you forgot the `openai/` prefix on the model name! |
 | **Kimi K2.6 returns `invalid temperature` (it may say only `1.0` or `0.6` is allowed)** | The model requires different fixed temperatures for thinking vs non-thinking mode, while older config or call paths may still pass `0.7`. | After this fix, default / thinking `kimi-k2.6` requests automatically use `temperature=1.0`; if you explicitly disable thinking in a LiteLLM YAML route, the request automatically uses `0.6` instead. Prefer `openai/kimi-k2.6` with your Moonshot or relay OpenAI-compatible Base URL and API key. Non-Kimi fallbacks still keep your configured `LLM_TEMPERATURE`. |
-| **GPT-5 / o-series returns that `temperature` is unsupported or only the default is allowed** | These models only accept the provider default sampling parameters, while older call paths may still send `0.7`. | The request layer now omits `temperature` so the provider default is used. Your `.env` / Web `LLM_TEMPERATURE` is not rewritten, and regular models keep using it after you switch back. |
+| **GPT-5 / GPT-6 / o-series returns that `temperature` is unsupported or only the default is allowed** | These models only accept the provider default sampling parameters, while older call paths may still send `0.7`. | The request layer now omits `temperature` so the provider default is used. Your `.env` / Web `LLM_TEMPERATURE` is not rewritten, and regular models keep using it after you switch back. |
 | **Spins endlessly, eventually hits Timeout/ConnectionRefused** | You are using restricted APIs (like Google/OpenAI) in a blocked region without a proxy, or your cloud server lacks external internet access. | Highly recommend using **official regional APIs** (like DeepSeek) or **OpenAI-compatible relay platforms**. Third-party platforms bypass these network constraints. |
 | **Ollama returns 404, `Could not get model info`, or `api/generate/api/show`** | Using `OPENAI_BASE_URL` for Ollama makes the system concatenate URLs incorrectly | Use `OLLAMA_API_BASE=http://localhost:11434` or channel mode (`LLM_CHANNELS=ollama` + `LLM_OLLAMA_BASE_URL`) instead |
 

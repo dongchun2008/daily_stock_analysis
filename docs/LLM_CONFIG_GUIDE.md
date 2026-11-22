@@ -1,5 +1,7 @@
 # LLM (大模型) 配置指南
 
+> **平台边界（2026-11-08）：** Gemini API 与 Vertex AI 的模型生命周期不同。Vertex AI 的 `gemini-3.6-flash` 占位值仅为输入示例；[Google Cloud 文档](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-6-flash)列出的该平台退役日期为 2026-11-19。请确认模型在你的项目和区域中可用；Gemini API 验证通过不代表 Vertex AI 也已验证。仅配置 DeepSeek Key 时会推断使用 `deepseek/deepseek-v4-flash`；显式模型及更高优先级配置仍然优先。
+
 欢迎！无论你是刚接触 AI 的新手小白，还是精通各种 API 的高玩老手，这份指南都能帮你快速把大模型（LLM）跑起来。
 
 本项目对外提供统一的 AI 模型接入体验，支持主流官方 API、OpenAI 兼容平台以及本地模型。底层由 [LiteLLM](https://docs.litellm.ai/) 驱动，但大多数用户只需要理解“选服务商、填 API Key、选主模型/渠道”这条默认路径。为了照顾不同阶段的用户，我们设计了“三层优先级”配置，按需选择最适合你的方式即可。
@@ -55,13 +57,13 @@ AGENT_GENERATION_BACKEND=auto
 - 本地 CLI 的 `stdout_preview` / `stderr_preview` 在写入结构化 diagnostics 前会脱敏短凭证赋值，不依赖值长度：大写环境变量赋值沿用 child-env 的 fail-closed 敏感名称判定，JSON 与 YAML / 普通日志中的标量赋值使用更窄的凭证字段 allowlist，URL 继续使用独立的 userinfo / webhook / 敏感参数规则。`token_budget`、`session_id`、`sort_key` 等普通排障字段不会仅因包含 `token`、`session` 或 `key` 子串而被删除；但未加引号的 YAML 敏感标量没有可靠的同行边界，因此从该值起到行尾会 fail-closed 脱敏，同行后续字段也不会保留。
 - 本地 CLI 默认并发为 1；有效并发为 `min(LOCAL_CLI_BACKEND_MAX_CONCURRENCY, GENERATION_BACKEND_MAX_CONCURRENCY)`，不继承 `MAX_WORKERS`。
 - `AGENT_GENERATION_BACKEND=auto` 不会继承 `GENERATION_BACKEND` 的 local CLI 值；Agent 工具调用继续使用 LiteLLM。Web 设置页仅暴露 `auto|litellm`；手写 `AGENT_GENERATION_BACKEND=codex_cli|claude_code_cli|opencode_cli` 不实现 text-only Agent mode，会返回明确 unsupported tool-calling 诊断。
-- Phase 6a 的 DSA Tool Surface 仍是唯一工具 schema、权限元数据、scope guard、结构化错误和审计/脱敏边界；Phase 6 的 Codex AgentBackend 只能通过该 Tool Surface 执行工具。`codex_cli` / `claude_code_cli` / `opencode_cli` 仍是 generation-only，不能作为 Agent tool fallback。
+- Phase 6a 的 DSA Tool Surface 保留工具 schema、权限元数据、scope guard、结构化错误和审计/脱敏能力；默认 LiteLLM 继续使用原有 registry/runner，不因移除 runtime 改造工具入口。`codex_cli` / `claude_code_cli` / `opencode_cli` 仍是 generation-only，不能作为 Agent tool fallback。
 - Web 设置页的生成后端快速检查只读取已保存的 `.env`、运行时兜底值和未保存草稿；它不会写配置、重载运行时，也不会发起真实模型请求。`available` 只表示当前配置具备尝试运行的条件。JSON 冒烟测试是单独的显式操作，会使用服务端固定的 JSON 提示词和 schema 发起一次真实的生成后端请求，用于验证提取器、JSON 契约、超时、输出限制和 usage-unavailable 语义。
 - `GET /api/v1/system/config/generation-backends/status` 只读取已保存配置；未保存草稿需调用 `POST /api/v1/system/config/generation-backends/status/preview` 或 `POST /api/v1/system/config/generation-backends/smoke-test`。被遮罩的密钥字段会继续沿用已保存值。`health_status` 与 `last_error_code/message` 只代表本次计算结果，不是历史持久健康状态。
 
 ### 问股会话状态与升级
 
-服务端统一保存主讨论对象及会话 Skill；LiteLLM single／现有 multi 与 Codex single 接口消费同一次接受快照。省略或 `null` Skill 沿用已保存选择（未选择时使用配置默认）；显式 `[]` 保存清空选择并使用内置默认，不启用配置中的非空 Skill。名称只在服务端索引唯一匹配时确认；比较不切股，模型失败／停止不撤销已接受状态。并发或会话实例冲突时，请手动刷新后重试，页面保留输入与待提交选择，不自动重发。
+服务端统一保存主讨论对象及会话 Skill；LiteLLM single／现有 multi 消费同一次接受快照。省略或 `null` Skill 沿用已保存选择（未选择时使用配置默认）；显式 `[]` 保存清空选择并使用内置默认，不启用配置中的非空 Skill。名称只在服务端索引唯一匹配时确认；比较不切股，模型失败／停止不撤销已接受状态。并发或会话实例冲突时，请手动刷新后重试，页面保留输入与待提交选择，不自动重发。
 
 旧会话只恢复明确代码，不从历史名称造新事实；“分析600519 → 改看宁德时代 → 风险呢”需要再确认，不能继续沿用600519。升级自动追加状态列，不删除消息／Skill／报告。升级或回滚前停止后端，使用 SQLite backup 或停服完整备份（不能在 WAL 活跃时只复制主文件）；保留原配置、数据库位置和数据目录，更新配套后端／Web 后重启，不手工删表／删列。回滚保留新增列，旧代码仍可写消息与 Skill；再次升级若发现回滚期间新增用户消息，先显示未确认，再由用户明确确认对象。旧／新写进程混跑不支持；分离部署升级先后端再 Web，回滚先 Web 再后端。
 
@@ -79,35 +81,11 @@ AGENT_GENERATION_BACKEND=auto
 
 同名会话的当前 Bot 与 Web 可以继续交替提问：Web 已确认对象后，Bot 普通追问使用该对象的严格工具范围，合法比较只为本轮增加比较对象；两者都保留 Web 主对象及其确认来源／时间，不递增股票状态版本。Bot 不独立持久化新主对象；明确切股或无法安全维持旧对象时，Web 状态进入待重新确认，不能继续声称旧对象可靠。真正旧代码／回滚期间的未知用户写入仍要求重新确认，不能当作当前状态感知 Bot。当前 Bot 提交校验准备快照的实例、版本和最新用户消息锚点；期间已有新接受则拒绝旧提交，不追加旧问题或自动重试模型。回复、provider trace 和摘要仍绑定该次读取的会话实例与真实消息来源，删除后重建不会接收旧实例的迟到写入。Web 的迟到初始列表可以更新列表展示，不能清空新请求／新接受实例或取消其 stream；正常的无会话恢复、切换和新建仍使用既有逻辑。
 
-这不改变模型路由、Phase 2 或 Codex 工具权限。Gate 0B 的受影响真实 Codex 路径仍为 BLOCKED；受控执行端的状态验证不能证明真实运行层或所有平台升级通过。
+会话状态契约不改变模型路由或 Phase 2 generation-only 能力。Codex App Server 问股后端已移除，不再提供等待 Gate 解锁的执行入口。历史 Gate 0B 的 BLOCKED 记录不因此变为通过；受控执行端的状态验证也不能证明真实运行层或所有平台升级通过。
 
-### Codex 本地 Agent（Phase 6 实验原型）
+### Codex App Server 问股退役
 
-`AGENT_BACKEND` 只决定现有问股 Chat 的运行方式，不影响普通报告、定时分析、大盘复盘、普通 Agent 分析 pipeline、LiteLLM Multi Agent 或 Deep Research：
-
-```env
-# auto（推荐）不会自动启用实验性的 Codex；auto 与 litellm 均保持原有默认模型路径。
-AGENT_BACKEND=auto
-# 显式启用时：
-# AGENT_BACKEND=codex_app_server
-# AGENT_ARCH=single
-```
-
-Web 启用步骤：打开「设置 → Agent 设置 → 问股生成方式」，选择「Codex 本地 Agent（实验）」，确认架构为「单 Agent」，并将 Agent 整体时限设置为大于 0 后保存。设置页只检查当前配置、本机 Codex 命令和所需 App Server 协议是否允许尝试，不登录、不调用模型，也不读取股票数据。保存后可直接回到问股页提问；第一次问题就是第一次真实执行。要恢复原有行为，选择「自动（推荐）」并保存。
-
-- Codex 必须安装并登录在**运行 DSA 后端的设备**上；DSA 不读取或保存 Codex 凭据，App Server 进程使用 Codex 自身登录态。Docker、远程服务器和 Desktop 的 PATH / 登录态彼此独立。在 Desktop 中从 Finder/Dock 启动时，后端只继承 Desktop 构造的真实 PATH；若状态提示找不到 Codex，请将 Codex CLI 安装到后端 PATH 可见位置并完全重启 DSA，不要只在另一个终端窗口验证。
-- Phase 6 的 Codex App Server Agent 当前支持 macOS、Linux，以及 DSA 后端完整运行于 WSL 的环境；原生 Windows 后端会在状态检查和 transport 启动前明确拒绝。此限制不影响 Phase 2 `GENERATION_BACKEND=codex_cli` 已有的 Windows 生成能力。
-- Codex 当前只开放已保存分析上下文、全局回测汇总和策略回测汇总的只读查询。本期只验证并承诺这三个工具的独立进程、停止、超时和回收闭环；实时行情、新闻、市场热点、技术指标重算、个股回测明细和持仓工具未纳入本期验证，因此不会出现在 Codex 的工具列表中。需要这些能力时，请在 Web 中选择「默认模型」。明确股票代码或 Web 已选择的唯一股票只会为已开放的历史分析上下文工具建立股票范围；遇到同名歧义时不会猜测。
-- 该能力不是离线模型。股票代码、问题、新闻、持仓上下文和脱敏后的工具结果可能由 Codex 自身配置的服务处理。
-- Codex 问股会传递当前激活的交易 Skill 指令。省略选择时沿用会话已保存选择（新会话使用默认技能），显式空列表清除会话选择并回到默认技能。Skill 只用于解读三个只读工具返回的已保存数据，不能增加工具权限；所需数据或能力不足时必须说明缺失项，不能声称完整执行了技能。
-- 当前只支持 single-agent Chat；不支持 Codex Multi Agent 或 Codex Deep Research。现有 LiteLLM Multi Agent 与 Deep Research 不受影响。
-- 每次 Chat 都创建新的 ephemeral App Server thread；DSA 继续保存原有可见会话历史，并在下一轮注入，但不会注入 LiteLLM provider trace。Web 客户端不会收到 chain-of-thought、原始 JSON-RPC、stderr 或完整工具参数/结果；Codex 只接收完成该轮分析所需的脱敏工具结果。
-- 用户停止问股时，页面会先显示“正在停止”。DSA 会中断 Codex turn，并结束、回收本轮独立运行的工具进程；只有确认 Codex 与工具进程均已退出后，原问股请求才返回最终“已停止”。超时和客户端断开也遵守同一清理边界，不会在后台仍有本轮任务时提前宣告结束。该契约仅作用于 Codex，不改变默认 LiteLLM Agent 的执行方式。
-- Codex 必须使用大于 0 的 `AGENT_ORCHESTRATOR_TIMEOUT_S`，以保证成功、失败、超时或停止都在明确时间内结束；`0` 关闭时限的旧语义只保留给默认 LiteLLM 路径，选择 Codex 时会在保存与运行前明确拒绝，不会静默替换成 600 秒。
-- 快速状态只检查配置、可执行文件、版本和生产路径实际依赖的 App Server schema 能力，不发模型请求，也不证明 Codex 已登录、模型可用或真实工具闭环。状态只表达“可以尝试”；真实命令、协议、登录、模型和工具错误在用户发送问题时按原始类别返回。Chat 每次加载检查一次，失败后由用户手动重新检查，不自动重试。
-- 正式 Chat 由服务端选择实际 backend。服务端完成上下文准备并保存用户问题后，SSE 才发出唯一 `accepted` 事件，然后开始模型执行。Web 在 `accepted` 前保留输入、股票范围、追问上下文和技能选择；因此环境或保存失败不会产生页面中的幽灵消息。`accepted` 返回的实际 backend 决定停止方式。
-- 每次问股共享一份整轮资源预算：App Server 的累计输出和事件数有界，工具调用总数服从现有 `AGENT_MAX_STEPS`，完成后立即清理本轮状态。工具进程按原始 UTF-8 结果字节计量，不会因 JSON 转义把合法结果误报为 handler 崩溃；超限统一返回明确错误并回收本轮进程，不重试或切换后端。
-- 当前依据 [Codex App Server v2 文档](https://developers.openai.com/codex/app-server/) 使用 JSONL stdio、ephemeral `thread/start`、`turn/start` / `turn/interrupt` 与 experimental dynamic tools。2026-07-15 的本地验收版本为 `codex-cli 0.144.3`；本项目不据此猜测通用最低版本。设置页兼容性检查只决定是否允许尝试，最终可用性以用户问题的真实执行结果为准。
+Codex App Server 问股后端已移除。`AGENT_BACKEND` 仅支持 `auto`（推荐，保持默认 LiteLLM）或 `litellm`。旧 `codex_app_server` 可加载、显示和导出，但执行请求在准备与接受提交前返回 `backend_removed`，不会自动切换模型、账号或 provider。请在「设置 → Agent 设置 → 问股生成方式」主动选择合法值并保存；已有旧值不阻止无关设置保存，显式保存或导入旧值则拒绝且不部分写入。状态与草稿预览只检查配置，不启动 Codex 命令或 schema/version 探针，也不调用模型。历史会话、股票身份、Skill、单/多 Agent 与 provider trace 保持原契约。独立 `GENERATION_BACKEND=codex_cli` 普通报告及其他 generation-only 不受此移除影响，仍需各自 CLI 及其原有依赖。
 
 ### Local CLI 本地 backend 隐私与边界
 
@@ -148,8 +126,8 @@ LITELLM_MODEL=openai/deepseek-ai/DeepSeek-V3
 # 填入你在 DeepSeek 官方平台申请的 API Key
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
 ```
-*兼容提示：仅填这一行时，系统仍会默认使用 `deepseek/deepseek-chat` 并在日志提示迁移。*
-`deepseek-chat` / `deepseek-reasoner` 仍可用于兼容旧配置，但 DeepSeek 官方已标记为 2026/07/24 后废弃；新配置建议通过 Web 快速渠道或显式 `LITELLM_MODEL=deepseek/deepseek-v4-flash` 迁移到 `deepseek-v4-flash` / `deepseek-v4-pro`。
+*仅填这一行时，系统默认使用 `deepseek/deepseek-v4-flash`。*
+`deepseek-chat` / `deepseek-reasoner` 已被 DeepSeek 官方公告于 2026/07/24 停用，旧配置请迁移；新配置建议通过 Web 快速渠道或显式 `LITELLM_MODEL=deepseek/deepseek-v4-flash` 迁移到 `deepseek-v4-flash` / `deepseek-v4-pro`。
 
 ### 示例 3：使用 Gemini 免费 API
 ```env
@@ -264,6 +242,10 @@ MODELFLARE_KEY=sk-xxx
 
 客户端快速添加按钮及渠道说明中的「Modelflare 专属注册」都使用 app UTM，README 使用 github UTM。新建渠道尚未填写 Key，或主模型/备用模型不属于当前启用渠道时，状态预览会提示「配置需要调整」并列出具体字段；补填 Key、选择可用模型或清空无效的备用模型后重试，预览不会自动改写已保存配置。
 
+### 示例：x6.ai
+
+在 Web 设置页选择 x6.ai，填写 Key 后获取模型并测试连接。环境变量及 GitHub Actions 请参考 [x6.ai 渠道配置](llm-providers.md#x6ai-聚合平台)，显式渠道需要同时配置渠道名、协议、地址和模型。
+
 ### 兼容示例：Anspire Responses API（GPT-5.6 名称为观测样本）
 
 ```env
@@ -292,7 +274,7 @@ LLM_DEEPSEEK_MODELS=deepseek-v4-flash,deepseek-v4-pro
 # 3. 渠道二：配置一个常用的聚合中转 API
 LLM_AIHUBMIX_BASE_URL=https://api.aihubmix.com/v1
 LLM_AIHUBMIX_API_KEY=sk-2222222222222
-LLM_AIHUBMIX_MODELS=gpt-5.5,claude-sonnet-4-6
+LLM_AIHUBMIX_MODELS=gpt-6.1-sol,claude-sonnet-4-6
 
 # 4. 【关键】指定主模型和备用模型列表
 # 平时首选用 deepseek 这款模型：
@@ -300,7 +282,7 @@ LITELLM_MODEL=deepseek/deepseek-v4-flash
 # 可选：Agent 问股单独指定主模型（留空则继承主模型）
 AGENT_LITELLM_MODEL=deepseek/deepseek-v4-pro
 # 主模型崩了立刻挨个尝试下面这俩备用模型：
-LITELLM_FALLBACK_MODELS=openai/gpt-5.4-mini,anthropic/claude-sonnet-4-6
+LITELLM_FALLBACK_MODELS=openai/gpt-6.1-terra,anthropic/claude-sonnet-4-6
 ```
 
 ### 示例：Ollama 渠道模式（本地模型，无需 API Key）
@@ -330,12 +312,12 @@ Hermes 是保留渠道名，只支持本机 loopback `/v1` OpenAI-compatible gen
 
 ### MiniMax 渠道模型填写说明
 
-- 如果你通过 OpenAI Compatible 渠道接 MiniMax，请在渠道模型里直接填写 `minimax/<模型名>`，例如 `minimax/MiniMax-M1`。
+- For the official OpenAI-compatible MiniMax channel, use `MiniMax-M3.1-Flash,MiniMax-M3`. Explicit saved provider-prefixed IDs such as `minimax/MiniMax-M3.1-Flash` remain supported.
 - Web 设置页里的主模型、Agent 主模型、Fallback、Vision 下拉会保留这个值原样展示，不会再错误改写成 `openai/minimax/<模型名>`。
 
 ### 默认模型问股 / LiteLLM 配置兼容说明
 
-- `AGENT_BACKEND=auto|litellm` 时，问股 Agent 沿用与普通分析相同的三层优先级：`LITELLM_CONFIG`（LiteLLM YAML）> `LLM_CHANNELS` > legacy provider keys。只要上层配置有效生效，下层配置就不会再参与本次请求；Codex 不使用这套模型路由。
+- `AGENT_BACKEND=auto|litellm` 时，问股 Agent 沿用与普通分析相同的三层优先级：`LITELLM_CONFIG`（LiteLLM YAML）> `LLM_CHANNELS` > legacy provider keys。只要上层配置有效生效，下层配置就不会再参与本次请求。
 - YAML 模式下，Agent 直接复用 LiteLLM `model_list` / `model_name` 路由语义；渠道模式下，优先读取 `AGENT_LITELLM_MODEL`，留空时继承 `LITELLM_MODEL`，再按 `LITELLM_FALLBACK_MODELS` 继续 fallback。
 - 如果你没有启用 YAML / Channels，且 `AGENT_LITELLM_MODEL` 也留空，但本地仍保留 legacy 环境变量，问股 Agent 依然会继承旧配置：`GEMINI_API_KEY + GEMINI_MODEL` -> `gemini/<model>`，`OPENAI_API_KEY + OPENAI_MODEL` -> `openai/<model>`，`ANTHROPIC_API_KEY + ANTHROPIC_MODEL` -> `anthropic/<model>`。
 - 该兼容逻辑只增强“失败时保留后端真实错误原因”和“未配置 LLM 时给出更具体诊断”，**不会**静默删除、清空、迁移或改写你现有的 `GEMINI_*` / `OPENAI_*` / `ANTHROPIC_*` / `LITELLM_*` 配置。
@@ -344,7 +326,7 @@ Hermes 是保留渠道名，只支持本机 loopback `/v1` OpenAI-compatible gen
 
 ### 问股可见对话上下文压缩
 
-默认情况下，问股仍按历史行为只注入最近 20 条可见对话。以下 LLM 压缩只适用于「默认模型」问股：Codex Agent 始终使用最近 20 条用户可见对话，不会调用 `AGENT_LITELLM_MODEL` 生成历史摘要。切换到 Codex 不会清空已保存的压缩配置，切回「默认模型」后会继续生效。需要为默认模型长会话省 token 时，可开启：
+默认情况下，问股仍按历史行为只注入最近 20 条可见对话。需要为默认模型长会话省 token 时，可开启：
 
 ```env
 AGENT_CONTEXT_COMPRESSION_ENABLED=true
@@ -363,7 +345,7 @@ AGENT_CONTEXT_PROTECTED_TURNS=
 - Moonshot 官方说明 Kimi API 兼容 OpenAI 接口，Base URL 使用 `https://api.moonshot.ai/v1`：<https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart>
 - LiteLLM 官方要求 OpenAI Compatible 渠道模型名使用 `openai/` 前缀：<https://docs.litellm.ai/docs/providers/openai_compatible>
 - Moonshot 官方兼容性文档区分两种固定值：**thinking 模式固定 `1.0`，non-thinking 模式固定 `0.6`**；传其它值会被接口拒绝：<https://platform.moonshot.ai/docs/guide/compatibility#parameters-differences-in-request-body>
-- OpenAI Chat Completions 规范中 `temperature` 是可选参数；对 GPT-5 / o 系列等只接受默认温度的模型，本项目会在请求层省略 `temperature`，让服务端使用默认值，而不是改写你的 `LLM_TEMPERATURE`：<https://platform.openai.com/docs/api-reference/chat/create>
+- OpenAI Chat Completions 规范中 `temperature` 是可选参数；对 GPT-5 / GPT-6 / o 系列等只接受默认温度的模型，本项目会在请求层省略 `temperature`，让服务端使用默认值，而不是改写你的 `LLM_TEMPERATURE`：<https://platform.openai.com/docs/api-reference/chat/create>
 - 当前仓库的运行时依赖约束是 `litellm>=1.80.10,!=1.82.7,!=1.82.8,<1.99.0`（见 `requirements.txt`）；本次兼容逻辑按该约束回归验证了主分析、大盘复盘、Agent 直连 LiteLLM，以及系统设置页的渠道连通性测试。
 - 因此本项目会在请求发出前按**实际请求模式**归一化 `kimi-k2.6` 及其 `kimi-k2.6-*` 变体：默认 / thinking 路径使用 `temperature=1.0`；如果你的 LiteLLM YAML 路由别名里显式写了 `litellm_params.extra_body.thinking.type: disabled`（或等价 non-thinking 配置），则自动切到 `temperature=0.6`。你在 `.env` 或 Web 设置里保存的 `LLM_TEMPERATURE` 不会被改写。
 - 如果兼容平台对未收录的新模型返回明确的参数错误（例如 `temperature` 不支持、只能使用默认 `1.0`、`top_p` 不支持），运行时会对**当前请求**做一次参数修正并重试；只有重试成功后才把该策略缓存在当前进程内。该缓存不会写回 `.env`，服务重启后会重新按配置与适配规则判断。
@@ -524,7 +506,7 @@ model_list:
 
 ```env
 # 指定你看图专用的模型名
-VISION_MODEL=openai/gpt-5.5
+VISION_MODEL=openai/gpt-6.1-sol
 # 别忘了填写它对应提供商的 API KEY，如果是 OpenAI 兼容渠道就提供 OPENAI_API_KEY：
 # OPENAI_API_KEY=xxx
 ```
@@ -548,11 +530,11 @@ VISION_PROVIDER_PRIORITY=gemini,anthropic,openai
 
 | 遇到了什么诡异报错？ | 罪魁祸首可能是啥？ | 该怎么收拾它？ |
 |----------------------|----------------------|------------------|
-| **界面提示主模型未配置** | 系统不知道你到底想用哪家的哪个模型 | 在 `.env` 中写上一句明白话：`LITELLM_MODEL=provider/你的模型名`。比如 `openai/gpt-5.5` |
+| **界面提示主模型未配置** | 系统不知道你到底想用哪家的哪个模型 | 在 `.env` 中写上一句明白话：`LITELLM_MODEL=provider/你的模型名`。比如 `openai/gpt-6.1-sol` |
 | **我写了好几家的Key，为什么死活只有一个生效？修改还没用？** | 你把 **极简模式** 和 **渠道模式** 混着写了！ | 想好一条路走到黑——只要简单就删掉 `LLM_CHANNELS` 开头的；想要丰富备用切换就要全部转投到 `LLM_CHANNELS` 下的编制里。 |
 | **错误码报 400 或 401 或 Invalid API Key** | API Key 填错、少复制了一截、账号充值没到账、或者模型名字敲错（极度常见）。 | 1. 检查复制的 Key 前后是否有误填空格。<br> 2. 检查 Base URL 最后是不是少了一个 `/v1`。<br> 3. 检查模型名是否少写了 `openai/` 之类的前缀！ |
 | **Kimi K2.6 报 `invalid temperature`（可能提示只允许 `1.0` 或 `0.6`）** | 该模型按 thinking / non-thinking 模式要求不同固定 temperature；旧配置或调用入口可能还在传 `0.7`。 | 升级后系统会对 `kimi-k2.6` 默认 / thinking 请求自动使用 `temperature=1.0`；如果你在 LiteLLM YAML 路由里显式关闭 thinking，则自动改用 `0.6`。模型名建议写成 `openai/kimi-k2.6` 并配合 Moonshot / 聚合平台的 OpenAI 兼容 Base URL 与 API Key。非 Kimi fallback 仍会继续使用你配置的 `LLM_TEMPERATURE`。 |
-| **GPT-5 / o 系列报 `temperature` 不支持或只允许默认值** | 这类模型只接受服务端默认采样参数，但旧调用入口会显式传 `0.7`。 | 升级后请求层会省略 `temperature`，让服务端使用默认值；`.env` / Web 设置中的 `LLM_TEMPERATURE` 不会被改写，切回普通模型后仍按原值发送。 |
+| **GPT-5 / GPT-6 / o 系列报 `temperature` 不支持或只允许默认值** | 这类模型只接受服务端默认采样参数，但旧调用入口会显式传 `0.7`。 | 升级后请求层会省略 `temperature`，让服务端使用默认值；`.env` / Web 设置中的 `LLM_TEMPERATURE` 不会被改写，切回普通模型后仍按原值发送。 |
 | **转圈转不停，最后报 Timeout / ConnectionRefused 等** | 1. 在国内使用国外原版（像 Google、OpenAI），没开代理被墙了。<br>2. 你买的云服务器压根不能出境。 | 非常推荐使用**国内官方**（如DeepSeek、阿里）或者各种**兼容 OpenAI 的聚合中转接口**。因为中转站把网络问题帮你解决好了。 |
 | **Ollama 报 404、`Could not get model info` 或 `api/generate/api/show`** | 误用 `OPENAI_BASE_URL` 配置 Ollama，系统会错误拼接 URL | 改用 `OLLAMA_API_BASE=http://localhost:11434` 或渠道模式（`LLM_CHANNELS=ollama` + `LLM_OLLAMA_BASE_URL`） |
 

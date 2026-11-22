@@ -1,0 +1,32 @@
+name: Retained maintenance contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retained-fixes:
+    name: Retained maintenance contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HF_HUB_OFFLINE: '1'
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install runtime and offline test dependencies
+        run: pip install -r requirements.txt pytest pytest-timeout PyYAML
+      - name: Verify retained data and operational contracts
+        run: python scripts/check_retained_fixes.py
+      - name: Verify synchronization guard counterexamples
+        run: python -m unittest discover -s tests -p test_retained_fix_policy.py

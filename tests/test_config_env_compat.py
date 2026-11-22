@@ -117,8 +117,10 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         self.assertEqual(config.market_review_region, "cn,us,kr")
 
     def test_market_review_region_keeps_legacy_mixed_both_and_empty_token_compatibility(self) -> None:
-        self.assertEqual(Config._parse_market_review_region("both,us"), "cn,hk,us,jp,kr")
+        self.assertEqual(Config._parse_market_review_region("both,us"), "cn,hk,us,jp,kr,tw")
         self.assertEqual(Config._parse_market_review_region("cn,,us"), "cn,us")
+        self.assertEqual(Config._parse_market_review_region("TW"), "tw")
+        self.assertEqual(Config._parse_market_review_region("tw,cn,invalid"), "cn,tw")
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
@@ -392,7 +394,7 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             "OPENAI_MODEL": "gpt-4.1",
             "OPENAI_BASE_URL": "https://openai.example.com/v1",
             "OPENAI_API_KEY": "base-key-12345",
-            "LITELLM_FALLBACK_MODELS": "openai/gpt-5.5,openai/gpt-4o-mini",
+            "LITELLM_FALLBACK_MODELS": "openai/gpt-6.1-sol,openai/gpt-4o-mini",
             "VISION_MODEL": "openai/gpt-4o-mini",
         }
         with patch.dict(os.environ, base_env, clear=True):
@@ -552,8 +554,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             os.environ,
             {
                 "STOCK_LIST": "600519",
-                "LITELLM_MODEL": "openai/gpt-5.5",
-                "OPENAI_MODEL": "gpt-5.5",
+                "LITELLM_MODEL": "openai/gpt-6.1-sol",
+                "OPENAI_MODEL": "gpt-6.1-sol",
                 "OPENAI_API_KEY": "sk-openai-test",
                 "OPENAI_BASE_URL": "https://openai.example/v1",
                 "NEWS_INTEL_RETENTION_DAYS": "14",
@@ -566,8 +568,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         ):
             config = Config._load_from_env()
 
-        self.assertEqual(config.litellm_model, "openai/gpt-5.5")
-        self.assertEqual(config.openai_model, "gpt-5.5")
+        self.assertEqual(config.litellm_model, "openai/gpt-6.1-sol")
+        self.assertEqual(config.openai_model, "gpt-6.1-sol")
         self.assertEqual(config.openai_base_url, "https://openai.example/v1")
         self.assertEqual(config.news_intel_retention_days, 14)
         self.assertEqual(config.news_intel_fetch_timeout_sec, 12.0)
@@ -774,6 +776,121 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         self.assertFalse(config.schedule_run_immediately)
 
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    @patch.object(Config, "_parse_stock_email_groups", return_value=[])
+    def test_schedule_startup_dedup_process_env_overrides_env_file(
+        self,
+        _mock_parse_stock_email_groups,
+        _mock_parse_litellm_yaml,
+    ) -> None:
+        """SCHEDULE_STARTUP_DEDUP must carry the same bootstrap override
+        semantics as the other startup keys (SCHEDULE_RUN_IMMEDIATELY et
+        al.): a process env value that differs from the persisted .env —
+        docker run -e / compose environment / shell export — is an
+        intentional override and must win over the .env copy.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("SCHEDULE_STARTUP_DEDUP=true\n", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ENV_FILE": str(env_path),
+                    "SCHEDULE_STARTUP_DEDUP": "false",
+                },
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertFalse(
+            config.schedule_startup_dedup,
+            "process env SCHEDULE_STARTUP_DEDUP=false must override the "
+            ".env value",
+        )
+
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    @patch.object(Config, "_parse_stock_email_groups", return_value=[])
+    def test_schedule_startup_dedup_uses_env_file_when_process_env_absent(
+        self,
+        _mock_parse_stock_email_groups,
+        _mock_parse_litellm_yaml,
+    ) -> None:
+        """State 1 of the SCHEDULE_RUN_IMMEDIATELY-parity contract: with no
+        process env value at all, the persisted .env keeps governing the
+        kill switch (WebUI persistence stays authoritative)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("SCHEDULE_STARTUP_DEDUP=false\n", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {"ENV_FILE": str(env_path)},
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertFalse(config.schedule_startup_dedup)
+
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    @patch.object(Config, "_parse_stock_email_groups", return_value=[])
+    def test_schedule_startup_dedup_equal_values_do_not_shadow_env_edit(
+        self,
+        _mock_parse_stock_email_groups,
+        _mock_parse_litellm_yaml,
+    ) -> None:
+        """State 2: when the bootstrap process env value EQUALS the .env
+        value, the key must not be flagged as an explicit override, so a
+        later WebUI .env edit still takes effect on reload (same reload
+        flow as test_runtime_mutable_keys_prefer_env_file_after_restart)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("SCHEDULE_STARTUP_DEDUP=false\n", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ENV_FILE": str(env_path),
+                    "SCHEDULE_STARTUP_DEDUP": "false",
+                },
+                clear=True,
+            ):
+                Config._load_from_env()
+                # WebUI persisted a new value into .env; process env stays.
+                env_path.write_text(
+                    "SCHEDULE_STARTUP_DEDUP=true\n", encoding="utf-8"
+                )
+                Config.reset_instance()
+                setup_env(override=True)
+                config = Config._load_from_env()
+
+        self.assertTrue(config.schedule_startup_dedup)
+
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    @patch.object(Config, "_parse_stock_email_groups", return_value=[])
+    def test_schedule_startup_dedup_process_env_wins_when_absent_from_file(
+        self,
+        _mock_parse_stock_email_groups,
+        _mock_parse_litellm_yaml,
+    ) -> None:
+        """State 3: a process env value for a key that .env does not carry
+        at all is a genuine explicit override and must be honoured."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("LOG_LEVEL=INFO\n", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ENV_FILE": str(env_path),
+                    "SCHEDULE_STARTUP_DEDUP": "false",
+                },
+                clear=True,
+            ):
+                config = Config._load_from_env()
+
+        self.assertFalse(config.schedule_startup_dedup)
+
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
     def test_runtime_mutable_keys_use_process_env_when_absent_from_file(
         self,
         _mock_parse_yaml,
@@ -860,8 +977,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
                 "\n".join(
                     [
                         "STOCK_LIST=600519",
-                        "LITELLM_MODEL=openai/gpt-5.5",
-                        "OPENAI_MODEL=gpt-5.5",
+                        "LITELLM_MODEL=openai/gpt-6.1-sol",
+                        "OPENAI_MODEL=gpt-6.1-sol",
                         "OPENAI_API_KEY=runtime-openai-key",
                         "OPENAI_BASE_URL=https://openai.example/v1",
                         "CUSTOM_WEBHOOK_BODY_TEMPLATE={\"title\":$$title_json,\"content\":$$content_json}",
@@ -880,8 +997,8 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
             ):
                 config = Config._load_from_env()
 
-        self.assertEqual(config.litellm_model, "openai/gpt-5.5")
-        self.assertEqual(config.openai_model, "gpt-5.5")
+        self.assertEqual(config.litellm_model, "openai/gpt-6.1-sol")
+        self.assertEqual(config.openai_model, "gpt-6.1-sol")
         self.assertEqual(config.openai_api_key, "runtime-openai-key")
         self.assertEqual(config.openai_base_url, "https://openai.example/v1")
         self.assertEqual(
@@ -939,7 +1056,7 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         )
         self.assertEqual(
             Config._parse_market_review_region("both"),
-            "cn,hk,us,jp,kr",
+            "cn,hk,us,jp,kr,tw",
         )
 
     @patch("src.config.setup_env")

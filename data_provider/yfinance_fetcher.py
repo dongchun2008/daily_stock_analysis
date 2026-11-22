@@ -16,6 +16,7 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 
 import csv
 import logging
+import math
 from datetime import datetime
 from io import StringIO
 from typing import Optional, List, Dict, Any
@@ -35,6 +36,7 @@ from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, _is_hk_market, 
 from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
 from .us_index_mapping import get_us_index_yf_symbol, is_us_stock_code
 from .yfinance_fundamental_adapter import _safe_float
+from src.core.trading_calendar import get_market_now, get_us_completed_cash_sessions
 from src.services.market_symbol_utils import get_suffix_market, is_suffix_market_symbol
 
 # 可选导入本地股票映射补丁，若缺失则使用空字典兜底
@@ -305,7 +307,10 @@ class YfinanceFetcher(BaseFetcher):
 
         return df
 
-    def _fetch_yf_ticker_data(self, yf, yf_code: str, name: str, return_code: str) -> Optional[Dict[str, Any]]:
+    def _fetch_yf_ticker_data(
+        self, yf, yf_code: str, name: str, return_code: str, *,
+        us_sessions=None, include_observation=False,
+    ) -> Optional[Dict[str, Any]]:
         """
         通过 yfinance 拉取单个指数/股票的行情数据。
 
@@ -320,32 +325,64 @@ class YfinanceFetcher(BaseFetcher):
         """
         ticker = yf.Ticker(yf_code)
         # 取近两日数据以计算涨跌幅
-        hist = ticker.history(period='2d')
+        hist = ticker.history(period='5d' if us_sessions else '2d')
         if hist.empty:
             return None
-        today_row = hist.iloc[-1]
-        prev_row = hist.iloc[-2] if len(hist) > 1 else today_row
+        if us_sessions or include_observation:
+            if not isinstance(hist.index, pd.DatetimeIndex) or hist.index.hasnans:
+                return None
+            hist = hist.sort_index()
+        if us_sessions:
+            previous, target = us_sessions
+            # Daily Yahoo labels are exchange dates, not quote timestamps.
+            matches = [hist[hist.index.date == day] for day in (previous, target)]
+            if any(len(match) != 1 for match in matches):
+                return None
+            prev_row, today_row = (match.iloc[0] for match in matches)
+        else:
+            today_row = hist.iloc[-1]
+            prev_row = hist.iloc[-2] if len(hist) > 1 else today_row
+        if us_sessions or include_observation:
+            if len(hist) < 2 or (not us_sessions and today_row.name.date() == prev_row.name.date()):
+                return None
+            if not all(
+                math.isfinite(float(row['Close'])) and float(row['Close']) > 0
+                for row in (today_row, prev_row)
+            ):
+                return None
         price = float(today_row['Close'])
         prev_close = float(prev_row['Close'])
         change = price - prev_close
         change_pct = (change / prev_close) * 100 if prev_close else 0
-        high = float(today_row['High'])
-        low = float(today_row['Low'])
+        if (us_sessions or include_observation) and not math.isfinite(change_pct):
+            return None
+        def optional_number(value):
+            try:
+                number=float(value)
+                return number if math.isfinite(number) else None
+            except (TypeError,ValueError):return None
+        checked=bool(us_sessions or include_observation)
+        high = optional_number(today_row.get('High')) if checked else float(today_row['High'])
+        low = optional_number(today_row.get('Low')) if checked else float(today_row['Low'])
         # 振幅 = (最高 - 最低) / 昨收 * 100
-        amplitude = ((high - low) / prev_close * 100) if prev_close else 0
+        amplitude = ((high - low) / prev_close * 100) if high is not None and low is not None and prev_close else None
+        if checked and amplitude is not None and not math.isfinite(amplitude):amplitude=None
+        if not checked and not prev_close:amplitude=0
         return {
             'code': return_code,
             'name': name,
             'current': price,
             'change': change,
             'change_pct': change_pct,
-            'open': float(today_row['Open']),
+            'open': optional_number(today_row.get('Open')) if checked else float(today_row['Open']),
             'high': high,
             'low': low,
             'prev_close': prev_close,
-            'volume': float(today_row['Volume']),
+            'volume': optional_number(today_row.get('Volume')) if checked else float(today_row['Volume']),
             'amount': 0.0,  # Yahoo Finance 不提供准确成交额
             'amplitude': amplitude,
+            **({'cash_session_date': today_row.name.date().isoformat()} if us_sessions else {}),
+            **({'observation_date': today_row.name.date().isoformat()} if include_observation else {}),
         }
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[Dict[str, Any]]]:
@@ -398,18 +435,32 @@ class YfinanceFetcher(BaseFetcher):
 
         return None
 
-    def _get_us_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
+    def _get_us_main_indices(
+        self, yf, *, current_time: Optional[datetime] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
         """获取美股主要指数行情（SPX、IXIC、DJI、VIX），复用 _fetch_yf_ticker_data"""
         # 大盘复盘所需核心美股指数
         us_indices = ['SPX', 'IXIC', 'DJI', 'VIX']
+        # Today's provider bar may still be updating right at the cash close.
+        sessions = get_us_completed_cash_sessions(current_time)
+        latest_label=get_market_now('us',current_time).date().isoformat()
+        earliest_label=sessions[1].isoformat() if sessions else latest_label
         results = []
         try:
             for code in us_indices:
+                if code != 'VIX' and sessions is None:
+                    continue
                 yf_symbol, name = get_us_index_yf_symbol(code)
                 if not yf_symbol:
                     continue
                 try:
-                    item = self._fetch_yf_ticker_data(yf, yf_symbol, name, code)
+                    item = self._fetch_yf_ticker_data(
+                        yf, yf_symbol, name, code,
+                        us_sessions=sessions if code != 'VIX' else None,
+                        include_observation=code == 'VIX',
+                    )
+                    if item and code=='VIX' and not earliest_label<=item['observation_date']<=latest_label:
+                        continue
                     if item:
                         results.append(item)
                         logger.debug(f"[Yfinance] 获取美股指数 {name} 成功")
@@ -720,7 +771,7 @@ class YfinanceFetcher(BaseFetcher):
                 volume = getattr(info, 'lastVolume', None) or getattr(info, 'last_volume', None)
             except Exception:
                 logger.debug("[Yfinance] fast_info 失败，尝试 history 方法")
-                hist = ticker.history(period='2d')
+                hist = ticker.history(period='2d', auto_adjust=False)
                 if hist.empty:
                     logger.warning(f"[Yfinance] 无法获取 {yf_symbol} 的数据")
                     return None
@@ -832,6 +883,9 @@ class YfinanceFetcher(BaseFetcher):
             logger.debug(f"[Yfinance] 获取 {symbol} 实时行情")
 
             ticker = yf.Ticker(symbol)
+            provider_timestamp = None
+            quote_date = None
+            used_fast_info = False
 
             # 尝试获取 fast_info（更快，但字段较少）
             try:
@@ -846,11 +900,12 @@ class YfinanceFetcher(BaseFetcher):
                 low = getattr(info, 'dayLow', None) or getattr(info, 'day_low', None)
                 volume = getattr(info, 'lastVolume', None) or getattr(info, 'last_volume', None)
                 market_cap = getattr(info, 'marketCap', None) or getattr(info, 'market_cap', None)
+                used_fast_info = True
 
             except Exception:
                 # 回退到 history 方法获取最新数据
                 logger.debug("[Yfinance] fast_info 失败，尝试 history 方法")
-                hist = ticker.history(period='2d')
+                hist = ticker.history(period='2d', auto_adjust=False)
                 if hist.empty:
                     if is_us_symbol:
                         logger.warning(f"[Yfinance] 无法获取 {symbol} 的数据，尝试 Stooq 兜底")
@@ -860,6 +915,7 @@ class YfinanceFetcher(BaseFetcher):
 
                 today = hist.iloc[-1]
                 prev = hist.iloc[-2] if len(hist) > 1 else today
+                quote_date = pd.Timestamp(hist.index[-1]).date().isoformat()
 
                 price = float(today['Close'])
                 prev_close = float(prev['Close'])
@@ -869,23 +925,52 @@ class YfinanceFetcher(BaseFetcher):
                 volume = int(today['Volume'])
                 market_cap = None
 
-            # 计算涨跌幅
+            # 获取股票名称与 provider 元数据
+            try:
+                ticker_info = ticker.info or {}
+            except Exception:
+                ticker_info = {}
+
+            if used_fast_info:
+                # fast_info does not expose the quote session.  In current
+                # yfinance versions its price/OHLCV properties are backed by
+                # history, so use one history response for both values and the
+                # provider timestamp.  regularMarketTime from ticker.info is
+                # not safe: it may belong to a different quote payload.
+                try:
+                    quote_history = ticker.history(period='2d', auto_adjust=False)
+                    if isinstance(quote_history, pd.DataFrame) and len(quote_history) >= 2:
+                        today = quote_history.iloc[-1]
+                        prev = quote_history.iloc[-2]
+                        required_fields = ('Open', 'High', 'Low', 'Close', 'Volume')
+                        values = [today.get(field) for field in required_fields]
+                        previous_close = prev.get('Close')
+                        if not any(pd.isna(value) for value in values) and not pd.isna(previous_close):
+                            # Keep the selected quote values and their date in
+                            # the same provider response.  This avoids pairing
+                            # an old fast_info daily bar with a newer info time.
+                            price = float(today['Close'])
+                            prev_close = float(previous_close)
+                            open_price = float(today['Open'])
+                            high = float(today['High'])
+                            low = float(today['Low'])
+                            volume = int(today['Volume'])
+                            quote_date = pd.Timestamp(quote_history.index[-1]).date().isoformat()
+                except Exception:
+                    logger.debug("[Yfinance] 无法读取 %s 的行情日期", symbol, exc_info=True)
+
+            # 计算最终行情字段对应的派生指标。fast_info 之后可能被 history
+            # 覆盖，不能复用覆盖前的结果。
             change_amount = None
             change_pct = None
             if price is not None and prev_close is not None and prev_close > 0:
                 change_amount = price - prev_close
                 change_pct = (change_amount / prev_close) * 100
 
-            # 计算振幅
             amplitude = None
             if high is not None and low is not None and prev_close is not None and prev_close > 0:
                 amplitude = ((high - low) / prev_close) * 100
 
-            # 获取股票名称与 provider 元数据
-            try:
-                ticker_info = ticker.info or {}
-            except Exception:
-                ticker_info = {}
             try:
                 info_name = ticker_info.get('shortName', '') or ticker_info.get('longName', '') or ''
                 name = info_name if is_meaningful_stock_name(info_name, symbol) else STOCK_NAME_MAP.get(symbol, '')
@@ -932,6 +1017,8 @@ class YfinanceFetcher(BaseFetcher):
                 pb_ratio=pb_ratio,
                 total_mv=market_cap,
                 circ_mv=None,
+                provider_timestamp=provider_timestamp,
+                quote_date=quote_date,
             )
 
             logger.info(f"[Yfinance] 获取 {symbol} 实时行情成功: 价格={price}")

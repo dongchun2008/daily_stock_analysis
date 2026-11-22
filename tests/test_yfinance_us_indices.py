@@ -9,6 +9,7 @@ data_provider/yfinance_fetcher 中美股指数获取逻辑的单元测试
 import sys
 import os
 import unittest
+from datetime import date
 from unittest.mock import MagicMock, patch
 import pandas as pd
 
@@ -30,7 +31,7 @@ def _make_mock_hist(close: float, prev_close: float, high: float = None, low: fl
         'High': [prev_close + 1, high],
         'Low': [prev_close - 1, low],
         'Volume': [1000000.0, 1200000.0],
-    }, index=pd.DatetimeIndex(['2025-02-16', '2025-02-17']))
+    }, index=pd.DatetimeIndex(['2026-11-19', '2026-11-20']))
 
 
 def _make_mock_yf(hist_df: pd.DataFrame):
@@ -96,6 +97,8 @@ class TestGetUsMainIndices(unittest.TestCase):
     def setUp(self):
         from data_provider.yfinance_fetcher import YfinanceFetcher
         self.fetcher = YfinanceFetcher()
+        selector=patch('data_provider.yfinance_fetcher.get_us_completed_cash_sessions',return_value=(date(2026,11,19),date(2026,11,20)))
+        selector.start();self.addCleanup(selector.stop)
 
     @patch('data_provider.yfinance_fetcher.get_us_index_yf_symbol')
     def test_returns_list_when_mock_succeeds(self, mock_get_symbol):

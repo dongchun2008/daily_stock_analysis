@@ -25,6 +25,8 @@ def fixture(method, language, up=0, down=0, flat=0, amount=0):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == 'self':
             name = node.func.attr
             value = language if name in {'_get_review_language', '_get_output_language'} else ''
+            if name == '_tw_index_coverage_lines':
+                value = []
             setattr(analyzer, name, lambda *args, value=value: value)
     overview = SimpleNamespace(date='2026-11-06', indices=[], top_sectors=[], bottom_sectors=[], top_concepts=[], bottom_concepts=[], up_count=up, down_count=down, flat_count=flat, limit_up_count=0, limit_down_count=0, total_amount=amount)
     return analyzer, overview

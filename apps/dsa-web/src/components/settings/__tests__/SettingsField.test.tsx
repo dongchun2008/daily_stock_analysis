@@ -7,6 +7,47 @@ import { UI_LANGUAGE_STORAGE_KEY } from '../../../utils/uiLanguage';
 import { SettingsField } from '../SettingsField';
 
 describe('SettingsField', () => {
+  it.each(['zh', 'en'] as const)('shows the TickPlus recommendation and project registration link (%s)', (language) => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, language);
+    const title = language === 'zh' ? 'TickPlus API Key（推荐）' : 'TickPlus API Key (Recommended)';
+    const registration = 'http://www.tickplus.org/register?reg=5433cf922395';
+    render(<UiLanguageProvider><SettingsField item={{
+      key: 'TICKPLUS_API_KEY', value: '', rawValueExists: false, isMasked: false,
+      schema: { key: 'TICKPLUS_API_KEY', title: 'TickPlus API Key (Recommended)',
+        category: 'data_source', dataType: 'string', uiControl: 'password',
+        isSensitive: true, isRequired: false, isEditable: true, displayOrder: 15,
+        options: [], validation: {},
+        helpKey: 'settings.data_source.TICKPLUS_API_KEY',
+        examples: ['TICKPLUS_API_KEY=your_tickplus_key'],
+        docs: [{ label: 'TickPlus (Recommended) — Register', href: registration }],
+      },
+    }} value="" onChange={vi.fn()} /></UiLanguageProvider>);
+    expect(screen.getByLabelText(title)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /TickPlus/ }));
+    expect(screen.getByRole('dialog', { name: title })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /TickPlus.*Register/ })).toHaveAttribute('href', registration);
+    window.localStorage.removeItem(UI_LANGUAGE_STORAGE_KEY);
+  });
+
+  it.each(['zh', 'en'] as const)('shows the retired value explicitly and lets the user correct it (%s)', (language) => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, language);
+    const onChange = vi.fn();
+    render(<UiLanguageProvider><SettingsField item={{
+      key: 'AGENT_BACKEND', value: 'codex_app_server', rawValueExists: true, isMasked: false,
+      schema: { key: 'AGENT_BACKEND', category: 'agent', dataType: 'string', uiControl: 'select',
+        isSensitive: false, isRequired: false, isEditable: true, displayOrder: 1,
+        options: ['auto', 'litellm'], validation: { enum: ['auto', 'litellm'] } },
+    }} value="codex_app_server" onChange={onChange} /></UiLanguageProvider>);
+    const selector = screen.getByRole('combobox');
+    expect(selector).toHaveValue('codex_app_server');
+    expect(screen.getByRole('option', { selected: true })).toBeDisabled();
+    expect(screen.getByRole('option', { selected: true }).textContent).toContain(language === 'en' ? 'removed' : '已移除');
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.change(selector, { target: { value: 'auto' } });
+    expect(onChange).toHaveBeenCalledWith('AGENT_BACKEND', 'auto');
+    window.localStorage.removeItem(UI_LANGUAGE_STORAGE_KEY);
+  });
+
   it('prefers localized Chinese field titles over backend schema titles', () => {
     render(
       <SettingsField

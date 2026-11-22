@@ -11,10 +11,11 @@
 """
 
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from inspect import getattr_static
 from typing import Optional, Dict, Any, List
 
@@ -26,6 +27,7 @@ from src.report_language import normalize_report_language
 from src.search_service import SearchService
 from src.core.market_profile import get_profile, MarketProfile
 from src.core.market_strategy import get_market_strategy_blueprint
+from src.core.trading_calendar import get_market_now, get_us_completed_cash_sessions
 from src.llm.backend_registry import (
     LOCAL_CLI_GENERATION_BACKEND_IDS,
     LITELLM_BACKEND_ID,
@@ -48,6 +50,8 @@ _ENGLISH_SECTION_PATTERNS = {
     "sector_highlights": r"###\s*(?:4\.\s*)?(?:Sector Highlights|Sector/Theme Highlights)",
 }
 
+_US_CASH_INDEX_CODES = frozenset({"SPX", "IXIC", "DJI"})
+
 _CHINESE_SECTION_PATTERNS = {
     "market_summary": r"###\s*一、(?:盘面总览|市场总结)",
     "index_commentary": r"###\s*二、(?:指数结构|指数点评|主要指数)",
@@ -65,14 +69,17 @@ class MarketIndex:
     current: float = 0.0         # 当前点位
     change: float = 0.0          # 涨跌点数
     change_pct: float = 0.0      # 涨跌幅(%)
-    open: float = 0.0            # 开盘点位
-    high: float = 0.0            # 最高点位
-    low: float = 0.0             # 最低点位
+    open: Optional[float] = 0.0   # 开盘点位，缺失时 None
+    high: Optional[float] = 0.0   # 最高点位
+    low: Optional[float] = 0.0    # 最低点位
     prev_close: float = 0.0      # 昨收点位
-    volume: float = 0.0          # 成交量（手）
+    volume: Optional[float] = 0.0 # 来源成交量，缺失时 None
     amount: float = 0.0          # 成交额（元）
-    amplitude: float = 0.0       # 振幅(%)
+    amplitude: Optional[float] = 0.0 # 振幅(%)
     
+    cash_session_date: Optional[str] = None
+    observation_date: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'code': self.code,
@@ -86,6 +93,8 @@ class MarketIndex:
             'volume': self.volume,
             'amount': self.amount,
             'amplitude': self.amplitude,
+            **({'cash_session_date': self.cash_session_date} if self.cash_session_date else {}),
+            **({'observation_date': self.observation_date} if self.observation_date else {}),
         }
 
 
@@ -107,6 +116,8 @@ class MarketOverview:
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
+    data_collected_at: Optional[str] = None
+    cash_session_date: Optional[str] = None
 
 
 @dataclass
@@ -144,14 +155,14 @@ class MarketAnalyzer:
         Args:
             search_service: 搜索服务实例
             analyzer: AI分析器实例（用于调用LLM）
-            region: 市场区域 cn=A股 hk=港股 us=美股 jp=日本 kr=韩国
+            region: 市场区域 cn=A股 hk=港股 us=美股 jp=日本 kr=韩国 tw=台股
             config: 本次复盘使用的配置；未传时读取全局配置
         """
         self.config = config or get_config()
         self.search_service = search_service
         self.analyzer = analyzer
         self.data_manager = DataFetcherManager()
-        self.region = region if region in ("cn", "us", "hk", "jp", "kr") else "cn"
+        self.region = region if region in ("cn", "us", "hk", "jp", "kr", "tw") else "cn"
         self.profile: MarketProfile = get_profile(self.region)
         self.strategy = get_market_strategy_blueprint(self.region)
 
@@ -307,6 +318,8 @@ class MarketAnalyzer:
             return "Japan market" if review_language == "en" else "日本市场"
         if self.region == "kr":
             return "Korea market" if review_language == "en" else "韩国市场"
+        if self.region == "tw":
+            return "Taiwan market" if review_language == "en" else "台股市场"
         if review_language == "en":
             return "A-share market"
         return "A股市场"
@@ -321,13 +334,15 @@ class MarketAnalyzer:
             return "JPY bn" if self._get_review_language() == "en" else "十亿日元"
         if self.region == "kr":
             return "KRW bn" if self._get_review_language() == "en" else "十亿韩元"
+        if self.region == "tw":
+            return "TWD bn" if self._get_review_language() == "en" else "十亿新台币"
         return "CNY 100m" if self._get_review_language() == "en" else "亿"
 
     def _format_turnover_value(self, amount_raw: float) -> str:
         """Format raw turnover according to market-specific units."""
         if amount_raw == 0.0:
             return "N/A"
-        if self.region in ("us", "hk", "jp", "kr"):
+        if self.region in ("us", "hk", "jp", "kr", "tw"):
             return f"{amount_raw / 1e9:.2f}"
         if amount_raw > 1e6:
             return f"{amount_raw / 1e8:.0f}"
@@ -348,9 +363,12 @@ class MarketAnalyzer:
                 "hk": "HK Market Recap",
                 "jp": "Japan Market Recap",
                 "kr": "Korea Market Recap",
+                "tw": "Taiwan Market Recap",
             }
             market_name = market_names.get(self.region, "A-share Market Recap")
             return f"## {date} {market_name}"
+        if self.region == "tw":
+            return f"## {date} 台股大盘复盘"
         return f"## {date} 大盘复盘"
 
     def _get_index_hint(self) -> str:
@@ -363,10 +381,29 @@ class MarketAnalyzer:
                 return "Analyze the key moves in the Nikkei 225, TOPIX, and other major Japanese indices."
             if self.region == "kr":
                 return "Analyze the key moves in the KOSPI, KOSDAQ, and other major Korean indices."
+            if self.region == "tw":
+                return "Analyze TAIEX and the TPEx index; disclose missing indices without inferring their moves."
             return "Analyze the price action in the SSE, SZSE, ChiNext, and other major indices."
         return self.profile.prompt_index_hint
 
     def _get_strategy_prompt_block(self) -> str:
+        if self.region == "tw" and self._get_review_language() == "en":
+            return """## Strategy Blueprint: Taiwan Index and News Recap
+Assess Taiwan market risk from available TAIEX/TPEx index data and verified news.
+
+### Strategy Principles
+- Check index coverage before comparing TAIEX and TPEx direction.
+- Distinguish semiconductor heavyweight signals from smaller-company themes.
+- Do not invent institutional flows, breadth, aggregate turnover, or sector rankings.
+
+### Analysis Dimensions
+- Index Structure: assess trend and divergence only for indices with available data.
+- News Catalysts: examine sourced semiconductor, export-chain, and global technology news.
+
+### Action Framework
+- Risk-on: available indices and news align; state data limitations.
+- Neutral: indices diverge or coverage is incomplete; wait for confirmation.
+- Risk-off: indices weaken or external risk rises; prioritize drawdown control."""
         if self.region == "hk" and self._get_review_language() == "en":
             return """## Strategy Blueprint: Hong Kong Market Regime Strategy
 Focus on HSI trend, southbound flow dynamics, and sector rotation to define next-session risk posture.
@@ -497,6 +534,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _get_strategy_markdown_block(self, review_language: str | None = None) -> str:
         review_language = review_language or self._get_review_language()
+        if self.region == "tw" and review_language == "en":
+            return """### 6. Strategy Framework
+- **Index Structure**: Assess TAIEX/TPEx direction using available data; disclose missing coverage.
+- **News Catalysts**: Follow verified semiconductor, export-chain, and global technology news.
+- **Data Limits**: No market breadth, institutional flows, aggregate turnover, or sector rankings.
+"""
         if self.region == "hk" and review_language == "en":
             return """### 6. Strategy Framework
 - **Trend Regime**: Classify the market as momentum, range, or risk-off based on HSI/HSTECH/HSCEI alignment.
@@ -549,18 +592,39 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             }
         return mapping[mood_key]
 
-    def get_market_overview(self) -> MarketOverview:
+    def get_market_overview(self, *, current_time: Optional[datetime] = None) -> MarketOverview:
         """
         获取市场概览数据
         
         Returns:
             MarketOverview: 市场概览数据对象
         """
-        today = datetime.now().strftime('%Y-%m-%d')
+        now = get_market_now("tw") if self.region == "tw" else datetime.now()
+        today = now.strftime('%Y-%m-%d')
         overview = MarketOverview(date=today)
         
         # 1. 获取主要指数行情（按 region 切换 A 股/美股）
         overview.indices = self._get_main_indices()
+        if self.region == "us":
+            collected_at = get_market_now('us',current_time).astimezone(timezone.utc)
+            overview.data_collected_at = collected_at.astimezone(timezone.utc).isoformat(timespec="seconds")
+            # Independently anchor provenance at collection completion. A fetch
+            # straddling the close guard may omit old rows, never score them.
+            sessions = get_us_completed_cash_sessions(collected_at)
+            expected = sessions[1].isoformat() if sessions else None
+            aligned = {
+                idx.code: idx for idx in overview.indices
+                if idx.code in _US_CASH_INDEX_CODES and expected and idx.cash_session_date == expected
+            }
+            if aligned:
+                overview.cash_session_date = expected
+            latest_vix_label = get_market_now("us", collected_at).date().isoformat()
+            overview.indices = [
+                idx for idx in overview.indices
+                if (aligned.get(idx.code) is idx)
+                or (self._is_vix_index(idx) and
+                    (idx.observation_date is None or idx.observation_date <= latest_vix_label))
+            ]
 
         # 2. 获取涨跌统计（A 股有，美股无等效数据）
         if self.profile.has_market_stats:
@@ -601,7 +665,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                         prev_close=item['prev_close'],
                         volume=item['volume'],
                         amount=item['amount'],
-                        amplitude=item['amplitude']
+                        amplitude=item['amplitude'],
+                        cash_session_date=item.get('cash_session_date'),
+                        observation_date=item.get('observation_date'),
                     )
                     indices.append(index)
 
@@ -743,6 +809,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "hk": "港股市场" if review_language == "zh" else "HK market",
             "jp": "日本股市" if review_language == "zh" else "Japan stock market",
             "kr": "韩国股市" if review_language == "zh" else "Korea stock market",
+            "tw": "台股市场" if review_language == "zh" else "Taiwan stock market",
         }
         
         try:
@@ -812,7 +879,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             )
             return ('[dsa-generation-status]: # (fallback_template)\n\n'
                     '> AI生成未完成：以下为模板兜底，不代表完整AI复盘。\n\n'
-                    + self._generate_template_review(overview, news))
+                    + self._with_tw_index_coverage(self._generate_template_review(overview, news), overview))
 
         # 构建 Prompt
         prompt = self._build_review_prompt(overview, news)
@@ -896,15 +963,31 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 len(review),
             )
             # Inject structured data tables into LLM prose sections
-            return self._inject_data_into_review(review, overview, news)
+            return self._with_tw_index_coverage(self._inject_data_into_review(review, overview, news), overview)
 
         logger.warning(
             "[大盘] %s action=generate_review status=fallback_template reason=empty_llm_response",
             self._log_context(),
         )
         return ('[dsa-generation-status]: # (fallback_template)\n\n'
-                    '> AI生成未完成：以下为模板兜底，不代表完整AI复盘。\n\n'
-                    + self._generate_template_review(overview, news))
+                '> AI生成未完成：以下为模板兜底，不代表完整AI复盘。\n\n'
+                + self._with_tw_index_coverage(self._generate_template_review(overview, news), overview))
+
+    def _tw_index_coverage_lines(self, overview: MarketOverview) -> List[str]:
+        """Keep missing Taiwan index coverage explicit even when an LLM omits it."""
+        if self.region != "tw":
+            return []
+        available = {index.code for index in overview.indices}
+        missing = [code for code in ("TWII", "TWOII") if code not in available]
+        suffix = {"zh": "行情缺失", "en": "data unavailable", "ko": "데이터 없음"}[self._get_output_language()]
+        return [f"- {code}: {suffix}" for code in missing]
+
+    def _with_tw_index_coverage(self, report: str, overview: MarketOverview) -> str:
+        lines = self._tw_index_coverage_lines(overview)
+        if not lines:
+            return report
+        title = {"zh": "数据边界", "en": "Data Limits", "ko": "데이터 한계"}[self._get_output_language()]
+        return f"{report.rstrip()}\n\n### {title}\n" + "\n".join(lines) + "\n"
 
     def _get_analyzer_generation_backend_config_error(self) -> Optional[GenerationError]:
         """Return analyzer backend config errors without relying on dynamic mock attributes."""
@@ -1005,8 +1088,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         title = self._extract_report_title(report) or self._get_review_title(overview.date).lstrip("# ").strip()
         light = (
             market_light_snapshot or self.build_market_light_snapshot(overview)
-            if self._supports_market_light()
-            else None
+            if self._has_review_signal(overview) else None
         )
         breadth_dimensions = None
         if isinstance(light, dict):
@@ -1038,8 +1120,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "green_up",
             ),
             "title": title,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": (datetime.now(timezone.utc) if self.region == "us" else datetime.now()).isoformat(),
             "date": overview.date,
+            **({
+                "cash_session_date": overview.cash_session_date,
+                "data_collected_at": overview.data_collected_at,
+            } if self.region == "us" else {}),
             "market_scope": self._get_market_scope_name(language),
             "indices": [idx.to_dict() for idx in overview.indices],
             "sectors": {
@@ -1055,6 +1141,13 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "markdown_report": report,
         }
 
+        if self.region=='us':
+            verified={idx.code for idx in self._verified_us_cash_indices(overview)}
+            if len(verified)<3:
+                payload['status']='partial'
+                payload['warnings']=['us_cash_indices_unavailable' if not verified else 'cash_index_coverage_incomplete']
+            if not verified:
+                payload['summary']=('US cash equity data unavailable; no market signal.' if language=='en' else '美股常规交易日股指不可用，不生成评分。')
         if light is not None:
             payload["market_light"] = light
 
@@ -1073,6 +1166,39 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _supports_market_light(self) -> bool:
         return self.region in MARKET_LIGHT_REGIONS
+
+    def _has_review_signal(self, overview: MarketOverview) -> bool:
+        return self._supports_market_light() and (
+            self.region != "us" or bool(self._get_directional_index_changes(overview))
+        )
+
+    @staticmethod
+    def _is_vix_index(idx: MarketIndex) -> bool:
+        return str(idx.code or "").strip().upper() in {"VIX", "^VIX"}
+
+    def _review_index_name(self, idx: MarketIndex, language: str) -> str:
+        if self.region != "us":
+            return idx.name
+        if self._is_vix_index(idx):
+            date = idx.observation_date or ("unknown date" if language == "en" else "日期未知")
+            return (
+                f"VIX (bar {date}; timestamp unavailable)"
+                if language == "en" else f"VIX（日线标签 {date}；精确报价时间未知）"
+            )
+        return f"{idx.name} ({idx.cash_session_date})" if idx.cash_session_date else idx.name
+
+    def _us_data_timing(self, overview: MarketOverview, language: str) -> str:
+        if self.region != "us":
+            return ""
+        count = len({idx.code for idx in self._verified_us_cash_indices(overview)})
+        session = overview.cash_session_date or ("unavailable" if language == "en" else "未核实")
+        generated = overview.data_collected_at or ("unavailable" if language == "en" else "未记录")
+        if language == "en":
+            return (f"US cash session (New York date): {session}; coverage {count}/3. "
+                    f"Report data collected: {generated}. "
+                    "VIX is a separate volatility observation, excluded from equity averages and scoring.")
+        return (f"美股常规交易日（美东）：{session}；股指覆盖 {count}/3。"
+                f"报告取数完成时间：{generated}。VIX 为单列波动率观察值，不计入股指均值和评分。")
 
     @staticmethod
     def _extract_report_title(report: str) -> str:
@@ -1139,6 +1265,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         """Inject structured data tables into the corresponding LLM prose sections."""
         # Build data blocks
         stats_block = self._build_stats_block(overview)
+        no_us_cash=self.region=='us' and not self._get_directional_index_changes(overview)
+        if no_us_cash:stats_block=''
         indices_block = self._build_indices_block(overview)
         sector_block = self._build_sector_block(overview)
         patterns = (
@@ -1179,6 +1307,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 )
                 review = f"{review.rstrip()}\n\n{fallback_heading}\n{sector_block}\n"
 
+        if no_us_cash:
+            notice=('US cash equity data unavailable; no market signal.' if self._get_review_language()=='en' else '美股常规交易日股指不可用，不生成评分。')
+            review=notice+'\n\n'+review
+        if self.region == "us" and indices_block and indices_block not in review:
+            review = f"{review.rstrip()}\n\n{indices_block}\n"
+
         return review
 
     @staticmethod
@@ -1206,7 +1340,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         missing_notice = ("Market statistics unavailable: breadth, price-limit counts and aggregate turnover were not obtained; missing data is not zero."
                 if self._get_review_language() == "en"
                 else "市场统计未获取成功：涨跌家数、涨跌停数量和全市场成交额暂不可用；缺失不代表数值为0。") if self.profile.has_market_stats and not has_stats else ""
-        has_market_signal = bool(self._supports_market_light() and (overview.indices or has_stats))
+        if self.region == "us" and not self._get_directional_index_changes(overview):
+            return ("US cash equity data unavailable; no market signal."
+                    if self._get_review_language() == "en" else "美股常规交易股指不可用，不生成评分。")
+        has_market_signal = bool(self._has_review_signal(overview) and (overview.indices or has_stats))
         if not has_stats and not has_market_signal:
             return missing_notice
         light = self.build_market_light_snapshot(overview) if has_market_signal else None
@@ -1259,8 +1396,27 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             )
         return "\n".join(([missing_notice] if missing_notice else []) + lines)
 
+    def _verified_us_cash_indices(self, overview: MarketOverview) -> List[MarketIndex]:
+        return [idx for idx in overview.indices
+                if idx.code in _US_CASH_INDEX_CODES and overview.cash_session_date
+                and idx.cash_session_date==overview.cash_session_date
+                and idx.change_pct is not None and math.isfinite(idx.change_pct)]
+
+    def _get_directional_index_changes(self, overview: MarketOverview) -> List[float]:
+        """Use aligned US equity rows; VIX remains excluded for all regions."""
+        if self.region == "us":
+            return [idx.change_pct for idx in self._verified_us_cash_indices(overview)]
+        return [
+            idx.change_pct
+            for idx in overview.indices
+            if idx.change_pct is not None
+            and str(idx.code or "").strip().upper() not in {"VIX", "^VIX"}
+        ]
+
     def build_market_light_snapshot(self, overview: MarketOverview) -> Dict[str, Any]:
         """Build a deterministic market-light snapshot from structured breadth data."""
+        if self.region=='us' and not self._get_directional_index_changes(overview):
+            raise ValueError('Verified US cash equity data unavailable; no market signal')
         scores = self._build_market_light_scores(overview)
         score = int(scores["score"])
         temperature_label = str(scores["temperature_label"])
@@ -1298,7 +1454,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         snapshot = MarketLightSnapshot(
             region=self.region,
-            trade_date=overview.date,
+            trade_date=overview.cash_session_date or overview.date,
             status=status,
             label=label_map[status],
             score=score,
@@ -1321,7 +1477,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 reasons.append(f"上涨家数占比 {up_ratio:.0%}，亏钱效应较强")
             else:
                 reasons.append(f"上涨家数占比 {up_ratio:.0%}，市场分化")
-        index_changes = [idx.change_pct for idx in overview.indices if idx.change_pct is not None]
+        index_changes = self._get_directional_index_changes(overview)
         if index_changes:
             avg_change = sum(index_changes) / len(index_changes)
             reasons.append(f"主要指数平均涨跌幅 {avg_change:+.2f}%")
@@ -1344,7 +1500,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 reasons.append(f"advancers ratio {up_ratio:.0%}, downside pressure dominates")
             else:
                 reasons.append(f"advancers ratio {up_ratio:.0%}, breadth is mixed")
-        index_changes = [idx.change_pct for idx in overview.indices if idx.change_pct is not None]
+        index_changes = self._get_directional_index_changes(overview)
         if index_changes:
             avg_change = sum(index_changes) / len(index_changes)
             reasons.append(f"average major-index change {avg_change:+.2f}%")
@@ -1358,19 +1514,22 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _build_indices_block(self, overview: MarketOverview) -> str:
         """构建指数行情表格"""
-        if not overview.indices:
-            return ""
-        if self._get_review_language() == "en":
+        language = self._get_review_language()
+        timing = self._us_data_timing(overview, language)
+        cash_indices = [idx for idx in overview.indices if self.region != "us" or not self._is_vix_index(idx)]
+        if language == "en":
             lines = [
                 f"| Index | Last | Change % | Open | High | Low | Amplitude | Turnover ({self._get_turnover_unit_label()}) |",
                 "|-------|------|----------|------|------|-----|-----------|-----------------|",
             ]
         else:
             lines = [
-                "| 指数 | 最新 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 | 成交额(亿) |",
+                f"| 指数 | 最新 | 涨跌幅 | 开盘 | 最高 | 最低 | 振幅 | 成交额({self._get_turnover_unit_label() if self.region == 'tw' else '亿'}) |",
                 "|------|------|--------|------|------|------|------|-----------|",
             ]
-        for idx in overview.indices:
+        if not cash_indices:
+            lines = []
+        for idx in cash_indices:
             arrow = self._get_index_change_arrow(idx.change_pct)
             amount_raw = idx.amount or 0.0
             amount_str = self._format_turnover_value(amount_raw)
@@ -1379,7 +1538,13 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 f"{self._format_optional_number(idx.open)} | {self._format_optional_number(idx.high)} | "
                 f"{self._format_optional_number(idx.low)} | {self._format_optional_pct(idx.amplitude)} | {amount_str} |"
             )
-        return "\n".join(lines)
+        if timing:
+            lines = [timing, "", *lines]
+            for idx in overview.indices:
+                if self._is_vix_index(idx):
+                    lines.extend(["", f"- {self._review_index_name(idx, language)}: "
+                                  f"{idx.current:.2f} ({idx.change_pct:+.2f}%)"])
+        return "\n".join(lines).rstrip()
 
     def _build_sector_block(self, overview: MarketOverview) -> str:
         """Build industry and concept ranking blocks."""
@@ -1523,8 +1688,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if breadth_available:
             breadth_score = int(overview.up_count / participants * 100)
 
-        index_changes = [idx.change_pct for idx in overview.indices if idx.change_pct is not None]
-        index_available = bool(overview.indices and index_changes)
+        index_changes = self._get_directional_index_changes(overview)
+        index_available = bool(index_changes)
         index_score = 50
         if index_available:
             avg_change = sum(index_changes) / len(index_changes)
@@ -1670,8 +1835,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         indices_text = ""
         for idx in overview.indices:
             direction = "↑" if idx.change_pct > 0 else "↓" if idx.change_pct < 0 else "-"
-            indices_text += f"- {idx.name}: {idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n"
-        
+            indices_text += (f"- {self._review_index_name(idx, review_language)}: "
+                             f"{idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n")
+        timing = self._us_data_timing(overview, review_language)
+
         # 板块信息
         top_sectors_text = self._format_ranking_summary(overview.top_sectors)
         bottom_sectors_text = self._format_ranking_summary(overview.bottom_sectors)
@@ -1714,7 +1881,9 @@ Industry lagging: {bottom_sectors_text if bottom_sectors_text else "N/A"}
 Concept leading: {top_concepts_text if top_concepts_text else "N/A"}
 Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 
-            data_limit_lines = [missing_notice] if missing_notice else []
+            data_limit_lines = self._tw_index_coverage_lines(overview)
+            if missing_notice:
+                data_limit_lines.append(missing_notice)
             if not self.profile.has_market_stats:
                 data_limit_lines.append(
                     "- Market breadth, aggregate turnover, participation, and fund-flow signals are not available for this market."
@@ -1737,7 +1906,9 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 概念领涨: {top_concepts_text if top_concepts_text else "暂无数据"}
 概念领跌: {bottom_concepts_text if bottom_concepts_text else "暂无数据"}"""
 
-            data_limit_lines = [missing_notice] if missing_notice else []
+            data_limit_lines = self._tw_index_coverage_lines(overview)
+            if missing_notice:
+                data_limit_lines.append(missing_notice)
             if not self.profile.has_market_stats:
                 data_limit_lines.append("- 该市场暂无涨跌家数、涨跌停、成交额汇总、参与度或资金流信号。")
             if not self.profile.has_sector_rankings:
@@ -1782,10 +1953,19 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
                 else "2-3句话概括指数表现、新闻线索和整体风险状态，不要补写未提供的市场宽度或资金流数据"
             )
 
+        if self.region == "us":
+            data_boundary_requirement += (
+                "- Distinguish the report date from the verified US cash-session date. "
+                "Do not use VIX to infer equity direction or treat its bar date as a quote time. "
+                "If the cash-session indices are unavailable, explicitly say so.\n"
+                if review_language == "en"
+                else "- 区分报告日期与已核实的美股交易日；不要把 VIX 的涨跌视为股指方向，"
+                     "也不要把其日线标签说成报价时点。美股股指缺失时须明确说明。\n"
+            )
         output_template_sections = self._build_output_template_sections(review_language)
         zh_market_scope_name = self._get_market_scope_name("zh")
         zh_report_title = f"{overview.date} 大盘复盘"
-        if self.region in ("jp", "kr"):
+        if self.region in ("jp", "kr", "tw"):
             zh_report_title = f"{overview.date} {zh_market_scope_name}大盘复盘"
         workflow_hint = (
             "报告要像交易员盘后工作台：先给结论，再按数据表、主线、催化、计划展开"
@@ -1813,6 +1993,7 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 {overview.date}
 
 ## Major Indices
+{timing}
 {indices_placeholder}
 
 {stats_block}
@@ -1867,6 +2048,7 @@ Output the report content directly, no extra commentary.
 {overview.date}
 
 ## 主要指数
+{timing}
 {indices_placeholder}
 
 {stats_block}
@@ -1927,6 +2109,8 @@ Output the report content directly, no extra commentary.
                 market_mood = self._get_market_mood_text("mild_down", template_language)
             else:
                 market_mood = self._get_market_mood_text("strong_down", template_language)
+        elif self.region in {"us", "tw"}:
+            market_mood = "insufficient index data" if template_language == "en" else "指数数据不足"
         else:
             market_mood = self._get_market_mood_text("range", template_language)
         
@@ -1934,7 +2118,11 @@ Output the report content directly, no extra commentary.
         indices_text = ""
         for idx in overview.indices[:4]:
             marker = self._get_index_change_arrow(idx.change_pct)
-            indices_text += f"- **{idx.name}**: {idx.current:.2f} ({marker} {idx.change_pct:+.2f}%)\n"
+            indices_text += (f"- **{self._review_index_name(idx, template_language)}**: "
+                             f"{idx.current:.2f} ({marker} {idx.change_pct:+.2f}%)\n")
+        timing = self._us_data_timing(overview, template_language)
+        if timing:
+            indices_text = f"{timing}\n\n{indices_text}"
         
         # 板块信息
         separator = ", " if template_language == "en" else "、"
@@ -1966,12 +2154,19 @@ Output the report content directly, no extra commentary.
                 "hk": "HK Market Recap",
                 "jp": "Japan Market Recap",
                 "kr": "Korea Market Recap",
+                "tw": "Taiwan Market Recap",
             }
             market_name = market_names.get(self.region, "A-share Market Recap")
+            summary_sentence = f"Today's {self._get_market_scope_name(template_language)} showed **{market_mood}**."
+            if self.region == "us":
+                summary_sentence = (
+                    f"The available US equity data showed **{market_mood}**."
+                    if self._get_directional_index_changes(overview) else "Cash equity data unavailable."
+                )
             report = f"""## {overview.date} {market_name}
 
 ### 1. Market Summary
-Today's {self._get_market_scope_name(template_language)} showed **{market_mood}**.
+{summary_sentence}
 
 ### 2. Major Indices
 {indices_text or "- No index data available"}
@@ -1987,7 +2182,7 @@ Market conditions can change quickly. The data above is for reference only and d
 """
             return report
 
-        market_labels = {"cn": "A股", "us": "美股", "hk": "港股", "jp": "日股", "kr": "韩股"}
+        market_labels = {"cn": "A股", "us": "美股", "hk": "港股", "jp": "日股", "kr": "韩股", "tw": "台股"}
         market_label = market_labels.get(self.region, "A股")
         dashboard_block = (
             self._build_stats_block(overview)
@@ -2026,9 +2221,16 @@ Market conditions can change quickly. The data above is for reference only and d
             if self.profile.has_market_stats
             else ""
         )
-        return f"""## {overview.date} 大盘复盘
+        summary_sentence = f"今日{market_label}市场整体呈现**{market_mood}**态势，优先观察{summary_focus}。"
+        if self.region == "us":
+            summary_sentence = (
+                f"已核实的 {overview.cash_session_date} 美东常规交易日股指呈现**{market_mood}**态势，优先观察{summary_focus}。"
+                if self._get_directional_index_changes(overview)
+                else "美股常规交易日股指不可用，无法判断美股盘面方向。"
+            )
+        return f"""{self._get_review_title(overview.date)}
 
-> 今日{market_label}市场整体呈现**{market_mood}**态势，优先观察{summary_focus}。
+> {summary_sentence}
 
 ### 一、盘面总览
 {market_summary_block}
@@ -2063,7 +2265,7 @@ Market conditions can change quickly. The data above is for reference only and d
 
         # 3. 生成复盘报告
         report = self.generate_market_review(overview, news)
-        snapshot = self.build_market_light_snapshot(overview) if self._supports_market_light() else None
+        snapshot = self.build_market_light_snapshot(overview) if self._has_review_signal(overview) else None
         structured_payload = self.build_market_review_payload(
             overview,
             news,

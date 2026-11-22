@@ -29,6 +29,7 @@ class RecoveryTests(unittest.TestCase):
                'record_llm_run':lambda **k:None,'record_llm_run_started':lambda **k:None,'time':time}
         fn=extract('src/market_analyzer.py','generate_market_review',scope)
         obj=types.SimpleNamespace(analyzer=analyzer,_get_analyzer_generation_backend_config_error=lambda:None,
+            _with_tw_index_coverage=lambda report,overview:report,
             _log_context=lambda:'region=cn',_generate_template_review=lambda *a:'synthetic template',
             _build_review_prompt=lambda *a:'synthetic prompt',_get_analyzer_generation_backend_identity=lambda:('synthetic','model'),
             _resolve_recorded_provider=lambda **k:'synthetic',
