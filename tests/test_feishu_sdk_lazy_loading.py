@@ -106,8 +106,10 @@ try:
          mock.patch("main._refresh_stock_index_cache_for_analysis"), \\
          mock.patch("main._run_auto_backtest"), \\
          mock.patch("main._compute_trading_day_filter", return_value=([], "cn", False)), \\
-         mock.patch("src.core.pipeline.StockAnalysisPipeline", return_value=pipeline), \\
-         mock.patch("src.core.market_review.run_market_review", return_value="# synthetic"):
+         mock.patch.dict(sys.modules, {
+             "src.core.pipeline": SimpleNamespace(StockAnalysisPipeline=mock.Mock(return_value=pipeline)),
+             "src.core.market_review": SimpleNamespace(run_market_review=mock.Mock(return_value="# synthetic")),
+         }):
         assert main.run_full_analysis(cfg, args, []) is True
     assert bool(imported) == configured, imported
     assert manager.create_daily_doc.call_count == int(configured)
