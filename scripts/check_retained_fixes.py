@@ -8,6 +8,7 @@ import yaml
 
 ROOT=Path(__file__).resolve().parents[1]
 REQUIRED_CONTRACTS={
+    'sell-summary-includes-reduce':{'tests/test_report_language.py'},
     'legacy-realtime-volume-shares':{'tests/test_mail_data_integrity.py'},
     'us-completed-session-provenance':{'tests/test_mail_data_integrity.py'},
     'bounded-market-work-and-checkpoints':{'tests/test_mail_recovery_bounds.py','tests/test_market_review_outer_guard.py'},

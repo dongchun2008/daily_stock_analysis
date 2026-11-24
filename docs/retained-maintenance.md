@@ -16,3 +16,5 @@ The two Nov22 mail-data repairs are:
 - US cash equity indices use the previous and latest **completed NYSE sessions**, waiting15 minutes after the regular/early close. Daily-bar dates, collection timestamps and report date are distinct. VIX is separately dated volatility data, excluded from cash-equity averages/scoring; missing/unverified cash data is disclosed instead of scored.
 
 The VPS remains the unique scheduled daily mail sender. Keep the repository's daily workflow disabled and do not reintroduce its cron during an upstream merge. Do not place production credentials, report bodies, private configuration or backups in this repository.
+
+The sell statistics bucket includes both `reduce` and `sell`. Report summaries therefore label it **减仓/卖出** (`Reduce/Sell`, `비중축소/매도`). Individual signals keep orange for reduce and red for sell; the combined summary must not change individual action semantics or colors.
