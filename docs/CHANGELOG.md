@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 通知汇总将合并统计的卖出组标为“减仓/卖出”，保留个股减仓橙色、卖出红色；英文及韩文同步。
 - [修复] 保持旧版 Tushare 实时成交量为股，美股指数按已收盘交易日核对日线并披露取数时间，VIX 单列且不参与股指评分。
 - [测试] 增加 fork 维护修复清单、离线数据回归与合并检查，避免上游同步覆盖未解决修复或恢复重复定时发信。
 

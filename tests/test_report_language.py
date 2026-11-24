@@ -19,6 +19,23 @@ from src.report_language import (
 
 
 class ReportLanguageTestCase(unittest.TestCase):
+    def test_sell_summary_names_both_actions_without_changing_signal_colors(self) -> None:
+        from types import SimpleNamespace
+        from src.schemas.decision_action import display_decision_type_for_result
+
+        for language, summary_label in (
+            ("zh", "减仓/卖出"), ("en", "Reduce/Sell"), ("ko", "비중축소/매도"),
+        ):
+            with self.subTest(language=language):
+                self.assertEqual(get_report_labels(language)["sell_label"], summary_label)
+                for action, emoji in (("reduce", "🟠"), ("sell", "🔴")):
+                    result = SimpleNamespace(action=action, operation_advice=action,
+                                             report_language=language, sentiment_score=30,
+                                             guardrail_reason="synthetic explicit risk guard")
+                    self.assertEqual(display_decision_type_for_result(result), "sell")
+                    self.assertEqual(get_signal_level(action, 30, language)[1], emoji)
+                self.assertNotEqual(get_signal_level("sell", 30, language)[0], summary_label)
+
     def test_get_signal_level_handles_compound_sell_advice(self) -> None:
         signal_text, emoji, signal_tag = get_signal_level("卖出/观望", 60, "zh")
 

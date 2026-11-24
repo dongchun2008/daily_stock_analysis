@@ -1,6 +1,7 @@
 {
   "version": 1,
   "fixes": [
+    {"id":"sell-summary-includes-reduce","status":"retained","reason":"The three-way sell summary includes reduce and sell; label both while preserving orange reduce and red sell individual signals.","tests":["tests/test_report_language.py"],"upstream_resolution":null},
     {"id":"legacy-realtime-volume-shares","status":"retained","reason":"Legacy Sina/Tushare realtime volume is already shares; invalid volume must not discard a valid price.","tests":["tests/test_mail_data_integrity.py"],"upstream_resolution":null},
     {"id":"us-completed-session-provenance","status":"retained","reason":"Use two completed NYSE sessions with publication delay; disclose collection time/session date and keep VIX separate from equity scoring.","tests":["tests/test_mail_data_integrity.py"],"upstream_resolution":null},
     {"id":"bounded-market-work-and-checkpoints","status":"retained","reason":"One stalled provider/market must not block all markets or future scheduler runs.","tests":["tests/test_mail_recovery_bounds.py","tests/test_market_review_outer_guard.py"],"upstream_resolution":null},
