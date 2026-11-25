@@ -9,6 +9,7 @@ data_provider/yfinance_fetcher 中港股指数获取逻辑的单元测试
 """
 import sys
 import os
+from datetime import datetime
 import unittest
 from unittest.mock import MagicMock, patch
 import pandas as pd
@@ -31,7 +32,7 @@ def _make_mock_hist(close: float, prev_close: float, high: float = None, low: fl
         'High': [prev_close + 100, high],
         'Low': [prev_close - 100, low],
         'Volume': [5000000000.0, 5200000000.0],
-    }, index=pd.DatetimeIndex(['2025-02-16', '2025-02-17']))
+    }, index=pd.DatetimeIndex(['2025-02-14', '2025-02-17']))
 
 
 def _make_mock_yf(hist_df: pd.DataFrame):
@@ -49,6 +50,9 @@ class TestHkIndexSymbolMapping(unittest.TestCase):
     def setUp(self):
         from data_provider.yfinance_fetcher import YfinanceFetcher
         self.fetcher = YfinanceFetcher()
+        sina = patch.object(self.fetcher, "_get_hk_sina_history", return_value=pd.DataFrame())
+        sina.start()
+        self.addCleanup(sina.stop)
 
     def test_hk_indices_mapping_symbols(self):
         """港股指数映射应使用正确的 Yahoo Finance 符号"""
@@ -57,7 +61,7 @@ class TestHkIndexSymbolMapping(unittest.TestCase):
         mock_ticker.history.return_value = pd.DataFrame()
         mock_yf.Ticker.return_value = mock_ticker
 
-        self.fetcher._get_hk_main_indices(mock_yf)
+        self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         # 收集所有 Ticker() 调用的参数
         ticker_calls = [call.args[0] for call in mock_yf.Ticker.call_args_list]
@@ -73,7 +77,7 @@ class TestHkIndexSymbolMapping(unittest.TestCase):
         mock_ticker.history.return_value = pd.DataFrame()
         mock_yf.Ticker.return_value = mock_ticker
 
-        self.fetcher._get_hk_main_indices(mock_yf)
+        self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         ticker_calls = [call.args[0] for call in mock_yf.Ticker.call_args_list]
 
@@ -87,13 +91,16 @@ class TestGetHkMainIndices(unittest.TestCase):
     def setUp(self):
         from data_provider.yfinance_fetcher import YfinanceFetcher
         self.fetcher = YfinanceFetcher()
+        sina = patch.object(self.fetcher, "_get_hk_sina_history", return_value=pd.DataFrame())
+        sina.start()
+        self.addCleanup(sina.stop)
 
     def test_returns_list_when_all_succeed(self):
         """全部指数取数成功时返回包含三个指数的列表"""
         mock_hist = _make_mock_hist(close=20000.0, prev_close=19800.0)
         mock_yf = _make_mock_yf(mock_hist)
 
-        result = self.fetcher._get_hk_main_indices(mock_yf)
+        result = self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         self.assertIsNotNone(result)
         self.assertIsInstance(result, list)
@@ -117,7 +124,7 @@ class TestGetHkMainIndices(unittest.TestCase):
         )
         mock_yf = _make_mock_yf(mock_hist)
 
-        result = self.fetcher._get_hk_main_indices(mock_yf)
+        result = self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         self.assertIsNotNone(result)
         item = result[0]
@@ -133,7 +140,7 @@ class TestGetHkMainIndices(unittest.TestCase):
         """部分指数 history 为空时仍返回能取到数据的指数"""
         call_count = [0]
 
-        def history_side_effect(period):
+        def history_side_effect(**kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
                 return _make_mock_hist(close=20000.0, prev_close=19800.0)
@@ -144,7 +151,7 @@ class TestGetHkMainIndices(unittest.TestCase):
         mock_yf = MagicMock()
         mock_yf.Ticker.return_value = mock_ticker
 
-        result = self.fetcher._get_hk_main_indices(mock_yf)
+        result = self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         self.assertIsNotNone(result)
         self.assertIsInstance(result, list)
@@ -154,7 +161,7 @@ class TestGetHkMainIndices(unittest.TestCase):
         """全部取数失败时返回 None"""
         mock_yf = _make_mock_yf(pd.DataFrame())
 
-        result = self.fetcher._get_hk_main_indices(mock_yf)
+        result = self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         self.assertIsNone(result)
 
@@ -165,7 +172,7 @@ class TestGetHkMainIndices(unittest.TestCase):
         mock_yf = MagicMock()
         mock_yf.Ticker.return_value = mock_ticker
 
-        result = self.fetcher._get_hk_main_indices(mock_yf)
+        result = self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         self.assertIsNone(result)
 
@@ -174,7 +181,7 @@ class TestGetHkMainIndices(unittest.TestCase):
         mock_hist = _make_mock_hist(close=20000.0, prev_close=19800.0)
         mock_yf = _make_mock_yf(mock_hist)
 
-        result = self.fetcher._get_hk_main_indices(mock_yf)
+        result = self.fetcher._get_hk_main_indices(mock_yf, current_time=datetime.fromisoformat('2025-02-17T18:00:00+08:00'))
 
         self.assertIsNotNone(result)
         codes = [item['code'] for item in result]
@@ -189,6 +196,9 @@ class TestGetMainIndicesDispatch(unittest.TestCase):
     def setUp(self):
         from data_provider.yfinance_fetcher import YfinanceFetcher
         self.fetcher = YfinanceFetcher()
+        sina = patch.object(self.fetcher, "_get_hk_sina_history", return_value=pd.DataFrame())
+        sina.start()
+        self.addCleanup(sina.stop)
 
     def test_region_hk_dispatches_to_hk_method(self):
         """region='hk' 应委托给 _get_hk_main_indices"""

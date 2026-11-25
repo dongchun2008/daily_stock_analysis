@@ -11,6 +11,7 @@ REQUIRED_CONTRACTS={
     'sell-summary-includes-reduce':{'tests/test_report_language.py'},
     'legacy-realtime-volume-shares':{'tests/test_mail_data_integrity.py'},
     'us-completed-session-provenance':{'tests/test_mail_data_integrity.py'},
+    'hk-completed-session-provenance':{'tests/test_hk_completed_review.py','tests/test_yfinance_hk_indices.py','tests/test_market_analyzer_generate_text.py'},
     'bounded-market-work-and-checkpoints':{'tests/test_mail_recovery_bounds.py','tests/test_market_review_outer_guard.py'},
     'truthful-missing-market-statistics':{'tests/test_market_stats_missing.py'},
     'unused-feishu-sdk-lazy-loading':{'tests/test_feishu_sdk_lazy_loading.py'},

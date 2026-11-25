@@ -17,7 +17,8 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 import csv
 import logging
 import math
-from datetime import datetime
+import re
+from datetime import date, datetime, timedelta
 from io import StringIO
 from typing import Optional, List, Dict, Any
 from urllib.error import HTTPError, URLError
@@ -36,7 +37,9 @@ from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, _is_hk_market, 
 from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
 from .us_index_mapping import get_us_index_yf_symbol, is_us_stock_code
 from .yfinance_fundamental_adapter import _safe_float
-from src.core.trading_calendar import get_market_now, get_us_completed_cash_sessions
+from src.core.trading_calendar import (
+    get_hk_completed_cash_sessions, get_market_now, get_us_completed_cash_sessions,
+)
 from src.services.market_symbol_utils import get_suffix_market, is_suffix_market_symbol
 
 # 可选导入本地股票映射补丁，若缺失则使用空字典兜底
@@ -476,8 +479,90 @@ class YfinanceFetcher(BaseFetcher):
 
         return None
 
-    def _get_hk_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
-        """获取港股主要指数行情（HSI、HSTECH、HSCEI），复用 _fetch_yf_ticker_data"""
+    @staticmethod
+    def _get_hk_sina_history(code: str) -> pd.DataFrame:
+        # Same local decoder used by AkShare's Sina HK daily adapter. Never
+        # evaluate the downloaded script: pass its validated data string only.
+        from akshare.stock.stock_hk_sina import hk_js_decode
+        from py_mini_racer import MiniRacer
+
+        request = Request(
+            f"https://finance.sina.com.cn/stock/hkstock/{code}/klc2_kl.js",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/javascript,*/*"},
+        )
+        limit = 512 * 1024
+        with urlopen(request, timeout=6) as response:
+            payload = response.read(limit + 1)
+        if len(payload) > limit:
+            return pd.DataFrame()
+        pattern = rb'var\s+KLC_K2_' + re.escape(code.encode("ascii")) + rb'\s*=\s*"([A-Za-z0-9+/=]+)"'
+        match = re.match(pattern, payload.lstrip())
+        if not match:
+            return pd.DataFrame()
+        decoder = MiniRacer()
+        decoder.eval(hk_js_decode)
+        records = decoder.call("d", match.group(1).decode("ascii"), timeout=1000)
+        hist = pd.DataFrame.from_records(records)
+        if "date" not in hist:
+            return pd.DataFrame()
+        return hist.set_index(pd.to_datetime(hist["date"], utc=True, errors="coerce")).rename(
+            columns={"open": "Open", "close": "Close", "high": "High", "low": "Low", "volume": "Volume"},
+        )
+
+    @staticmethod
+    def _build_hk_index_daily(
+        hist: pd.DataFrame, name: str, code: str, sessions: tuple[date, date], source: str,
+    ) -> Optional[Dict[str, Any]]:
+        previous, target = sessions
+        if hist.empty or not isinstance(hist.index, pd.DatetimeIndex) or hist.index.hasnans:
+            return None
+        dates = hist.index if hist.index.tz is None else hist.index.tz_convert("Asia/Hong_Kong")
+        matches = [hist[dates.date == day] for day in sessions]
+        if any(len(match) != 1 for match in matches):
+            return None
+        prior_row, row = (match.iloc[0] for match in matches)
+
+        def positive_price(record, key):
+            try:
+                value = float(record.get(key))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            return value if math.isfinite(value) and value > 0 else None
+
+        close = positive_price(row, "Close")
+        prev_close = positive_price(prior_row, "Close")
+        if close is None or prev_close is None:
+            return None
+        change = close - prev_close
+        pct = change / prev_close * 100
+        if not math.isfinite(pct):
+            return None
+        high, low, opening = (positive_price(row, key) for key in ("High", "Low", "Open"))
+        if high is not None and low is not None and high < low:
+            high = low = None
+        amplitude = (high - low) / prev_close * 100 if high is not None and low is not None else None
+        if amplitude is not None and not math.isfinite(amplitude):
+            amplitude = None
+        try:
+            volume = float(row.get("Volume"))
+        except (TypeError, ValueError, OverflowError):
+            volume = None
+        if volume is not None and (not math.isfinite(volume) or volume < 0):
+            volume = None
+        return {
+            "code": code, "name": name, "current": close, "prev_close": prev_close,
+            "open": opening, "high": high, "low": low, "volume": volume, "amount": 0.0,
+            "change": change, "change_pct": pct, "amplitude": amplitude,
+            "cash_session_date": target.isoformat(),
+            "previous_cash_session_date": previous.isoformat(), "source": source,
+        }
+
+    def _get_hk_main_indices(self, yf, *, current_time: Optional[datetime] = None) -> Optional[List[Dict[str, Any]]]:
+        """Fetch aligned, completed HK daily bars; never infer missing prior closes."""
+        sessions = get_hk_completed_cash_sessions(current_time)
+        if sessions is None:
+            logger.warning("[Yfinance] 港股指数交易日期不可核实")
+            return None
         # Yahoo Finance 港股指数符号映射：
         # - HSI -> ^HSI
         # - HSTECH -> HSTECH.HK（不是 ^HSTECH）
@@ -488,25 +573,33 @@ class YfinanceFetcher(BaseFetcher):
             'HSTECH': ('HSTECH.HK', '恒生科技指数'),
             'HSCEI': ('^HSCE', '国企指数'),
         }
+        previous, target = sessions
         results = []
-        try:
-            for code, (yf_symbol, name) in hk_indices.items():
+        for code, (symbol, name) in hk_indices.items():
+            try:
+                history = yf.Ticker(symbol).history(
+                    start=previous.isoformat(), end=(target + timedelta(days=1)).isoformat(),
+                    interval="1d", auto_adjust=False, timeout=6,
+                )
+                item = self._build_hk_index_daily(history, name, code, sessions, "yahoo")
+            except Exception as exc:
+                logger.warning("[Yahoo] 港股指数 %s 失败: %s", code, exc)
+                item = None
+            if item is None:
                 try:
-                    item = self._fetch_yf_ticker_data(yf, yf_symbol, name, code)
-                    if item:
-                        results.append(item)
-                        logger.debug(f"[Yfinance] 获取港股指数 {name} 成功")
-                except Exception as e:
-                    logger.warning(f"[Yfinance] 获取港股指数 {name} 失败: {e}")
-
-            if results:
-                logger.info(f"[Yfinance] 成功获取 {len(results)} 个港股指数行情")
-                return results
-
-        except Exception as e:
-            logger.error(f"[Yfinance] 获取港股指数行情失败: {e}")
-
-        return None
+                    history = self._get_hk_sina_history(code)
+                    item = self._build_hk_index_daily(history, name, code, sessions, "sina")
+                except Exception as exc:
+                    logger.warning("[Sina] 港股指数 %s 失败: %s", code, exc)
+            if item:
+                results.append(item)
+                logger.info(
+                    "[港股指数] code=%s source=%s previous=%s target=%s",
+                    code, item["source"], previous, target,
+                )
+            else:
+                logger.warning("[港股指数] %s 缺少有效日线对 %s/%s", code, previous, target)
+        return results or None
 
     def _get_jp_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
         """获取日本主要指数行情（日经225、TOPIX），复用 _fetch_yf_ticker_data。"""

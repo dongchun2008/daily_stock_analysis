@@ -306,6 +306,13 @@ def get_completed_daily_sessions(
         return None
 
 
+def get_hk_completed_cash_sessions(
+    current_time: Optional[datetime] = None,
+) -> Optional[Tuple[date, date]]:
+    """XHKG models continuous trading close; allow 10 min for CAS and 15 for publication."""
+    return get_completed_daily_sessions("hk", current_time, publication_delay=timedelta(minutes=25))
+
+
 def get_us_completed_cash_sessions(
     current_time: Optional[datetime] = None,
 ) -> Optional[Tuple[date, date]]:

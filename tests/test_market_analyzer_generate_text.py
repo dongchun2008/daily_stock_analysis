@@ -39,6 +39,16 @@ def _verified_us_overview(overview):
     return overview
 
 
+def _verified_hk_overview(overview, previous="2026-03-05"):
+    """Synthetic provider fixture: all supplied HK rows have two session labels."""
+    overview.cash_session_date = overview.date
+    overview.previous_cash_session_date = previous
+    for index in overview.indices:
+        index.cash_session_date = overview.cash_session_date
+        index.previous_cash_session_date = previous
+    return overview
+
+
 def _assert_usage_contains(usage, expected):
     for key, value in expected.items():
         assert usage[key] == value
@@ -4280,7 +4290,10 @@ Sector text.
             date="2026-03-06",
             indices=[MarketIndex(code=index_code, name=index_name, current=5000.0, change_pct=0.5)],
         )
-        if ma.region == "us": _verified_us_overview(overview)
+        if ma.region == "us":
+            _verified_us_overview(overview)
+        else:
+            _verified_hk_overview(overview)
         snapshot = ma.build_market_light_snapshot(overview)
         review = f"""## 2026-03-06 {report_title}
 
@@ -4322,7 +4335,10 @@ Index text.
             date="2026-03-06",
             indices=[MarketIndex(code=index_code, name=index_name, current=5000.0, change_pct=0.5)],
         )
-        if ma.region == "us": _verified_us_overview(overview)
+        if ma.region == "us":
+            _verified_us_overview(overview)
+        else:
+            _verified_hk_overview(overview)
         snapshot = ma.build_market_light_snapshot(overview)
 
         result = ma._generate_template_review(overview, [])
@@ -4343,7 +4359,7 @@ Index text.
             date="2026-03-06",
             indices=[MarketIndex(code="HSI", name="恒生指数", current=18200.0, change_pct=1.2)],
         )
-        snapshot = ma.build_market_light_snapshot(overview)
+        snapshot = ma.build_market_light_snapshot(_verified_hk_overview(overview))
 
         result = ma._generate_template_review(overview, [])
 
@@ -4750,6 +4766,9 @@ Index text.
             limit_up_count=30 if region == "cn" else 0,
             limit_down_count=10 if region == "cn" else 0,
         )
+
+        if region == "hk":
+            _verified_hk_overview(overview, "2026-11-05")
 
         snapshot = ma.build_market_light_snapshot(overview)
 
